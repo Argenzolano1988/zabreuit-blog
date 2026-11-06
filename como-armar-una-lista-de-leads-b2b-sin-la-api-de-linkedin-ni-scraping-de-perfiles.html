@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo armar una lista de leads B2B sin la API de LinkedIn ni scraping de perfiles</title>
+<meta name="description" content="Una lista de empresas con contacto público se arma con el sitio de cada empresa, registros públicos y cinco pasos. Método completo, con código.">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-10-31</p><h1>Cómo armar una lista de leads B2B sin la API de LinkedIn ni scraping de perfiles</h1>
+<p>Una lista de empresas con contacto público se arma con el sitio de cada empresa, registros públicos y cinco pasos. Método completo, con código.</p>
+<p>El pedido típico: "necesito 500 empresas de logística en Argentina y Uruguay, con el responsable de compras y un email que funcione". La respuesta automática es buscar un exportador de LinkedIn. Ahí empieza el problema.</p>
+<h2>Por qué el atajo de LinkedIn no cierra</h2>
+<p>La API existe, pero no es un buscador de personas: el acceso a datos de miembros va por programas de partner con aprobación comercial, campos acotados y condiciones que excluyen armar bases propias para prospección masiva.</p>
+<p>El scraping de perfiles tiene el problema inverso: funciona hasta que la cuenta desaparece. Y aunque sobreviva, devuelve un cargo y una empresa, nunca un email. El email se adivina con un patrón (<code>nombre.apellido@empresa.com</code>), y cada dirección inventada que no existe es un rebote.</p>
+<p>El camino menos vistoso que sí escala es usar lo que la empresa publica por obligación o por interés comercial: sitio corporativo, datos estructurados, páginas de contacto y equipo, directorios de cámaras, registros de proveedores del Estado.</p>
+<h2>Qué cuenta como decisor público</h2>
+<p>No vas a obtener el organigrama interno. Lo que suele estar publicado:</p>
+<ul>
+<li>Página de equipo o "nosotros" con nombres y cargos.</li>
+<li>Firmas de comunicados de prensa.</li>
+<li>Representante legal en un registro público de sociedades.</li>
+<li>Responsable de compras en pliegos de licitación y actas de adjudicación.</li>
+</ul>
+<p>Si el cargo no aparece en ninguno de esos lugares, no hay dato: hay una suposición. Un pipeline honesto deja la fila vacía en vez de inventar un nombre.</p>
+<h2>Paso 1: descubrir el dominio</h2>
+<p>La lista de empresas rara vez trae dominio; trae razón social, ciudad y rubro. Fuentes que rinden:</p>
+<ul>
+<li>Directorios de cámaras sectoriales y binacionales, con socio, rubro, teléfono y sitio.</li>
+<li>Listas de expositores de ferias del rubro.</li>
+<li>Registros de proveedores del Estado, con CUIT/CNPJ y a veces el sitio.</li>
+<li>Búsquedas por rubro y ciudad, descartando agregadores.</li>
+</ul>
+<p>Resolver nombre a dominio es mecánico; descartar falsos positivos no. Dos chequeos baratos: el dominio tiene MX activo y la home menciona la razón social, la ciudad o el rubro. Un dominio parqueado con publicidad pasa el primero y falla el segundo.</p>
+<h2>Paso 2: extraer la entidad del propio sitio</h2>
+<p>Muchos sitios corporativos ya publican sus datos en JSON-LD, el mismo bloque que usan los buscadores para entender la empresa. Se lee del HTML sin renderizar JavaScript y sin pelear con selectores que cambian cada tres meses.</p>
+<pre><code>
+// entity-from-html.mjs — devuelve todos los nodos Organization del sitio
+export function parseJsonLd(html) {
+  const blocks = [...html.matchAll(/&lt;script[^&gt;]+type=["']application\/ld\+json["'][^&gt;]*&gt;([\s\S]*?)&lt;\/script&gt;/gi)];
+  const found = [];
+
+  for (const [, raw] of blocks) {
+    let data;
+    try {
+      data = JSON.parse(raw.replace(/&lt;!--|--&gt;/g, "").trim());
+    } catch {
+      continue; // bloque roto: se ignora, no se aborta el sitio
+    }
+    const queue = Array.isArray(data) ? [...data] : [data];
+    while (queue.length) {
+      const node = queue.shift();
+      if (!node || typeof node !== "object") continue;
+      if (Array.isArray(node["@graph"])) queue.push(...node["@graph"]);
+      const types = [].concat(node["@type"] ?? []);
+      if (types.some((t) =&gt; t === "Organization" || t === "Corporation" || t === "LocalBusiness")) {
+        found.push(node);
+      }
+    }
+  }
+  return found;
+}
+</code></pre>
+<p>Los campos que interesan son <code>name</code>, <code>legalName</code>, <code>email</code>, <code>telephone</code>, <code>vatID</code>, <code>taxID</code> y <code>address</code>.</p>
+<p>Sin JSON-LD, el fallback es la página de contacto: enlaces <code>mailto:</code> y <code>wa.me</code>, más el pie de página. Es más frágil, así que se marca <code>source: "html-fallback"</code> y se revisa a mano.</p>
+<p>Dos trampas:</p>
+<ul>
+<li><strong><code>@graph</code> anidado.</strong> Muchos sitios envuelven todo en <code>{"@context": ..., "@graph": [...]}</code>. Si solo mirás el primer nivel, no encontrás nada.</li>
+<li><strong>JSON-LD inválido.</strong> Comentarios HTML, comas finales o comillas curvas rompen <code>JSON.parse</code>. Un <code>try/catch</code> por bloque evita perder la página entera por un error.</li>
+</ul>
+<h2>Paso 3: normalizar antes de comparar</h2>
+<ul>
+<li><strong>Dominio:</strong> minúsculas, sin <code>www</code>, sin protocolo ni path. Guardar el host original para auditar.</li>
+<li><strong>Email:</strong> minúsculas, sin <code>mailto:</code>. <code>Contacto@</code> y <code>contacto@</code> rompen cualquier <code>GROUP BY</code> ingenuo.</li>
+<li><strong>Teléfono:</strong> a E.164. <code>11 4321-0000</code>, <code>+54 11 4321 0000</code> y <code>01143210000</code> son tres filas si no se normaliza.</li>
+<li><strong>Razón social:</strong> sacar <code>S.A.</code>, <code>S.R.L.</code>, <code>SAS</code>, <code>Ltda.</code>, <code>LLC</code>, puntos y dobles espacios; guardar el crudo aparte.</li>
+</ul>
+<p>Deduplicar es comparar. Comparar basura normalizada agrupa basura.</p>
+<h2>Paso 4: deduplicar con la clave correcta</h2>
+<p>La clave natural es el dominio registrable, pero calcularlo con <code>split(".")</code> es el error más común: <code>tienda.com.ar</code> unido por los dos últimos segmentos devuelve <code>com.ar</code>, así que todas las empresas argentinas caen en la misma fila.</p>
+<pre><code>
+const MULTI = new Set(["com.ar", "com.br", "com.mx", "com.co", "com.uy", "com.pe", "co.uk", "com.es"]);
+
+export function registrableDomain(host) {
+  const parts = host.toLowerCase().replace(/^www\./, "").split(".").filter(Boolean);
+  if (parts.length &lt;= 2) return parts.join(".");
+  const lastTwo = parts.slice(-2).join(".");
+  return MULTI.has(lastTwo) ? parts.slice(-3).join(".") : lastTwo;
+}
+</code></pre>
+<p>Después del dominio, el segundo criterio es el teléfono normalizado: hay grupos que publican la misma central en cinco sitios. El tercero es el CUIT/CNPJ cuando aparece.</p>
+<p>Lo que no conviene es deduplicar por nombre con distancia de edición. "Logística Sur" y "Logística del Sur" pueden ser dos empresas, y fusionarlas borra un lead real sin aviso.</p>
+<h2>Paso 5: verificar antes de exportar</h2>
+<ul>
+<li><strong>MX del dominio.</strong> <code>resolveMx</code> con al menos un registro significa que puede recibir correo; cero registros, que el email es decorativo.</li>
+<li><strong>Estado HTTP de la fuente.</strong> Un 404 o 403 al extraer indica pie de página viejo o bloqueo: reintentar o descartar.</li>
+<li><strong>Nombre del buzón.</strong> <code>info@</code>, <code>ventas@</code> y <code>contacto@</code> sirven para prospección general, no para "el responsable de compras". Etiquetarlos permite priorizar.</li>
+</ul>
+<p>Lo que no se puede prometer es que la casilla exista. Un servidor catch-all acepta cualquier dirección, así que una verificación SMTP dice "válido" para <code>cualquiercosa@empresa.com</code>; y el greylisting da error para una casilla que sí existe. El MX reduce ruido, no certifica el buzón.</p>
+<h2>Dónde se rompe</h2>
+<ul>
+<li><strong>Sitios renderizados en el cliente.</strong> Si el HTML inicial viene vacío, el JSON-LD puede estar inyectado por JavaScript.</li>
+<li><strong>Directorios sin IDs estables.</strong> Las fichas cambian de URL y el negocio aparece dos veces. Se resuelve con huella de contenido (nombre normalizado + teléfono), no con la URL.</li>
+<li><strong>Personas físicas.</strong> Un email con nombre y apellido es dato personal: bajo Ley 25.326 o LGPD, la base legal y el derecho de oposición aplican aunque el dato sea público. Definí quién procesa una baja antes de importar a un CRM.</li>
+<li><strong>Volumen.</strong> Cien dominios salen en minutos con cortesía entre requests; diez mil piden proxy, reintentos y cola. Eso ya es infraestructura.</li>
+</ul>
+<h2>Qué hacer con esto</h2>
+<p>Corré el pipeline contra veinte empresas del rubro y mirá cuántas filas salen completas: dominio, razón social, email y ciudad. Quince de veinte, la fuente sirve y escalás. Cuatro, el problema es la fuente, no el código.</p>
+<p>Si el cuello de botella pasa a ser el mantenimiento —directorios que cambian de estructura, MX a escala, entidad legal en la política de privacidad— eso está cubierto por <strong>B2B Leads Arsenal</strong>, dos volúmenes de herramientas sobre el mismo enfoque de fuentes públicas (contacto desde el sitio, verificador de MX y DMARC, entidad legal, directorios de cámaras y bolsas de empleo). No incluye emails privados de LinkedIn ni los va a incluir: si eso es lo que necesitás, el pack no te sirve.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-03">B2B Leads Arsenal — Vol. 1 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>

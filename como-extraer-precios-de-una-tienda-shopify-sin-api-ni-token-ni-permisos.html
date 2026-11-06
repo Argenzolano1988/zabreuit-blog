@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo extraer precios de una tienda Shopify sin API (ni token, ni permisos)</title>
+<meta name="description" content="Si trabajás en una agencia o tenés un e-commerce propio, tarde o temprano llega el pedido:">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-10-31</p><h1>Cómo extraer precios de una tienda Shopify sin API (ni token, ni permisos)</h1>
+<p>Si trabajás en una agencia o tenés un e-commerce propio, tarde o temprano llega el pedido:</p>
+<p>"necesito los precios de estas 12 tiendas de la competencia, actualizados cada semana".</p>
+<p>La respuesta que aparece primero en Google es la Admin API de Shopify. El problema es que la</p>
+<p>Admin API requiere ser el dueño de la tienda: instalás una app, generás un token con scope</p>
+<p><code>read_products</code> y listo. Para tu propia tienda funciona. Para las tiendas de otros, no existe.</p>
+<p>No hay forma legítima de pedirle un token a un competidor.</p>
+<p>Entonces la tarea se degrada a lo que hacen muchas agencias: alguien abre 12 pestañas, copia</p>
+<p>precios a un Excel y lo repite cada lunes. Con 300 SKU por tienda son 3.600 filas manuales por</p>
+<p>semana. Ese trabajo no lo paga ningún cliente.</p>
+<p>Hay una salida intermedia que casi nadie usa: la mayoría de las tiendas Shopify exponen su</p>
+<p>catálogo en endpoints públicos en JSON, los mismos que alimentan los temas y las integraciones</p>
+<p>de marketing. No hace falta token, no hace falta headless browser y no hace falta scraping de</p>
+<p>HTML.</p>
+<h2>El endpoint que sí existe</h2>
+<p>Toda tienda Shopify responde, por defecto, a dos rutas:</p>
+<pre><code>
+https://tienda.com/products.json
+https://tienda.com/collections/&lt;handle&gt;/products.json
+</code></pre>
+<p>La primera devuelve el catálogo completo paginado; la segunda, solo los productos de una</p>
+<p>colección concreta. Son las mismas rutas que usa el tema para renderizar listados y buscadores</p>
+<p>internos. Aceptan tres parámetros útiles:</p>
+<p>| Parámetro | Valor | Qué hace |</p>
+<p>|---|---|---|</p>
+<p>| <code>limit</code> | 1–250 | Productos por página. 250 es el máximo real. |</p>
+<p>| <code>page</code> | 1..n | Número de página. |</p>
+<p>| <code>published_status</code> | <code>published</code> | Filtra borradores (a veces ignorado en la ruta pública). |</p>
+<p>Un detalle que rompe scripts: <strong>la respuesta no incluye el total de páginas</strong>. La única forma</p>
+<p>de saber cuándo terminar es pedir páginas hasta que devuelva un array vacío. Si tu script asume</p>
+<p>que hay 20 páginas y corta ahí, vas a perder catálogo en tiendas grandes sin ningún error</p>
+<p>visible.</p>
+<p>Probá primero a mano, desde la terminal:</p>
+<pre><code>
+curl -s "https://gymshark.com/products.json?limit=2&amp;page=1" | head -c 600
+</code></pre>
+<p>Si ves un objeto con <code>"products": [...]</code>, la tienda está abierta. Si ves un 404 o un HTML de</p>
+<p>página de error, el merchant desactivó la ruta (pasa: algunos temas y apps de seguridad la</p>
+<p>bloquean). En ese caso hay que ir por <code>sitemap_products_1.xml</code> o por el JSON-LD del HTML, que</p>
+<p>es otro artículo.</p>
+<h2>El formato de los precios</h2>
+<p>Cada producto trae un array <code>variants</code>. El precio está a nivel variante, no a nivel producto,</p>
+<p>porque un mismo producto puede tener talle S a un precio y talle XL a otro. Los campos que</p>
+<p>importan:</p>
+<pre><code>
+{
+  "handle": "seamless-workout-leggings",
+  "title": "Seamless Workout Leggings",
+  "updated_at": "2026-10-28T14:02:11-04:00",
+  "variants": [
+    {
+      "sku": "LEG-BLK-S",
+      "title": "S / Black",
+      "price": "39.90",
+      "compare_at_price": "49.90",
+      "available": true
+    }
+  ]
+}
+</code></pre>
+<p>Tres trampas concretas:</p>
+<p>1. <strong><code>price</code> es un string decimal, no un número.</strong> <code>"39.90"</code> sumado sin <code>Number()</code> te da</p>
+<p>   concatenación de texto en JavaScript y columnas destruidas en el CSV.</p>
+<p>2. <strong>En <code>/products.json</code> los precios vienen en unidades, no en centavos.</strong> La Admin API sí usa</p>
+<p>   centavos (<code>3990</code>). Mezclar las dos fuentes en el mismo pipeline es el bug clásico que</p>
+<p>   multiplica todos los precios por 100 en un solo reporte.</p>
+<p>3. <strong><code>compare_at_price</code> puede ser <code>null</code>.</strong> Ese es el precio "antes de descuento". Si lo tratás</p>
+<p>   como número sin chequear, el descuento calculado te da <code>NaN</code> y el reporte de "quién bajó</p>
+<p>   precios" queda vacío sin avisar.</p>
+<p><code>available</code> es útil para distinguir "bajó el precio" de "se quedó sin stock y el precio viejo</p>
+<p>quedó congelado". Sin ese campo, un quiebre de stock parece una suba de precio.</p>
+<h2>Script mínimo, sin dependencias</h2>
+<p>Node 18+ ya trae <code>fetch</code>. Este script recorre el catálogo completo, respeta la paginación y</p>
+<p>escribe un CSV con una fila por variante:</p>
+<pre><code>
+// shopify-prices.mjs — uso: node shopify-prices.mjs https://tienda.com precios.csv
+import { writeFile } from 'node:fs/promises';
+
+const [, , store, out = 'precios.csv'] = process.argv;
+if (!store) {
+  console.error('Uso: node shopify-prices.mjs https://tienda.com [salida.csv]');
+  process.exit(1);
+}
+
+const base = store.replace(/\/+$/, '');
+const LIMIT = 250;
+
+async function fetchPage(page) {
+  const url = `${base}/products.json?limit=${LIMIT}&amp;page=${page}`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'price-audit/1.0 (+contacto@tudominio.com)' },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} en ${url}`);
+  const body = await res.json();
+  return Array.isArray(body.products) ? body.products : [];
+}
+
+const rows = [];
+for (let page = 1; ; page++) {
+  const products = await fetchPage(page);
+  if (products.length === 0) break;
+
+  for (const p of products) {
+    for (const v of p.variants ?? []) {
+      rows.push({
+        handle: p.handle,
+        product: p.title,
+        sku: v.sku ?? '',
+        variant: v.title,
+        price: Number(v.price).toFixed(2),
+        compare_at: v.compare_at_price == null ? '' : Number(v.compare_at_price).toFixed(2),
+        available: v.available === true ? 'yes' : 'no',
+        updated_at: p.updated_at ?? '',
+      });
+    }
+  }
+
+  if (products.length &lt; LIMIT) break;
+  await new Promise((r) =&gt; setTimeout(r, 1200)); // cortesía: no martillar el origen
+}
+
+if (rows.length === 0) throw new Error('Catálogo vacío o ruta /products.json deshabilitada');
+
+const headers = Object.keys(rows[0]);
+const escape = (val) =&gt; `"${String(val).replace(/"/g, '""')}"`;
+const csv = [
+  headers.join(','),
+  ...rows.map((r) =&gt; headers.map((h) =&gt; escape(r[h])).join(',')),
+].join('\n');
+
+await writeFile(out, csv, 'utf8');
+console.log(`${rows.length} variantes → ${out}`);
+</code></pre>
+<p>Corrélo y compará dos fechas:</p>
+<pre><code>
+node shopify-prices.mjs https://tienda-a.com lunes.csv
+node shopify-prices.mjs https://tienda-a.com jueves.csv
+</code></pre>
+<p>Con dos CSV, un <code>join</code> por <code>sku</code> te da el diff de precios. Ahí aparece el dato que el cliente</p>
+<p>paga: qué variante subió, cuánto y desde cuándo (<code>updated_at</code> lo confirma).</p>
+<h2>Lo que este método no resuelve</h2>
+<p>Vale ser explícito, porque acá se rompen la mitad de las promesas de scraping:</p>
+<ul>
+<li><strong>Precios por geografía o por moneda.</strong> Si la tienda sirve precios distintos según el país del</li>
+</ul>
+<p>  visitante, <code>/products.json</code> devuelve el precio de la moneda de la tienda, no el que ve tu</p>
+<p>  cliente en México. Para eso hace falta proxy con geo y renderizado de la página real.</p>
+<ul>
+<li><strong>Catálogos B2B con login.</strong> Si el precio está detrás de una sesión, no hay endpoint público</li>
+</ul>
+<p>  que lo exponga.</p>
+<ul>
+<li><strong>Volumen alto desde una sola IP.</strong> Shopify aplica rate limiting suave y puede devolver 429 o</li>
+</ul>
+<p>  páginas vacías. El <code>sleep</code> del script no es decorativo; y para 50 tiendas en paralelo conviene</p>
+<p>  proxy.</p>
+<ul>
+<li><strong>Tiendas con la ruta bloqueada.</strong> Ahí hay que parsear el HTML, que es entre 5 y 10 veces más</li>
+</ul>
+<p>  caro en tiempo y en mantenimiento.</p>
+<p>Si el volumen es de una tienda y una vez por semana, el script de arriba sobra. Si el cliente</p>
+<p>quiere 40 tiendas monitoreadas todos los días, con historial y alertas, mantener el script pasa</p>
+<p>a ser tu trabajo no pago.</p>
+<p>Ese es exactamente el caso para el que existe el actor</p>
+<p><a href="https://apify.com/joseabreuy/shopify-full-catalog-scraper"><strong>Shopify Full Catalog, Variants &amp; Inventory Scraper</strong></a></p>
+<p>en Apify: hace lo mismo (endpoint JSON, variantes, stock, SKU, imagen), pero resuelve la</p>
+<p>paginación, los reintentos y el proxy, y cobra por evento ($1.50 por 1.000 ítems) en vez de por</p>
+<p>tiempo de servidor. Lo corrés desde la consola de Apify, por API o como tool de MCP dentro de un</p>
+<p>agente, y exportás JSON/CSV sin escribir una línea.</p>
+<p>Si lo que necesitás es el pipeline completo —catálogo, stock, reseñas, detección de plataforma</p>
+<p>y auditoría SEO del competidor— está empaquetado en <strong>E-commerce Intelligence Vol. 1</strong></p>
+<p>(Gumroad, 10 extractores): &lt;https://gumroad.com/l/zabreuit-pack-01&gt;.</p>
+<p>Un consejo honesto antes de comprar: corré el script gratuito de esta página contra dos tiendas</p>
+<p>tuyas. Si el resultado te alcanza, no necesitás nada más. Si te encontrás escribiendo reintentos</p>
+<p>y manejando 429 a las dos semanas, ahí sí el actor te ahorra plata.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-01">E-commerce Intelligence — Vol. 1 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>
