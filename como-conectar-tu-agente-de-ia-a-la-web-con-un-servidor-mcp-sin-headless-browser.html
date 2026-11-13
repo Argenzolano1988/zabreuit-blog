@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo conectar tu agente de IA a la web con un servidor MCP (sin headless browser)</title>
+<meta name="description" content="Tu agente no ve la web: le pegás HTML a mano o levantás un Chromium por consulta. Un servidor MCP de 60 líneas resuelve ese acceso sin browser.">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-04</p><h1>Cómo conectar tu agente de IA a la web con un servidor MCP (sin headless browser)</h1>
+<p>Tu agente no ve la web: le pegás HTML a mano o levantás un Chromium por consulta. Un servidor MCP de 60 líneas resuelve ese acceso sin browser.</p>
+<p>En una sesión de Cursor o Claude Desktop el pedido suena simple: "mirá la página de precios de este competidor y compará los tres planes". El agente contesta de memoria, con precios de hace dos versiones, o directamente inventa. No es culpa del modelo: el proceso donde corre no tiene manos. Ve tus archivos, no la web.</p>
+<p>Hay tres formas de darle acceso y dos son malas.</p>
+<p>La primera es copiar y pegar el HTML. Funciona una vez, no funciona cuando el pipeline tiene que correr cien URLs por semana, y encima mete al contexto todo el menú, el banner de cookies y el footer.</p>
+<p>La segunda es levantar un headless browser. Playwright o Puppeteer te dan una página renderizada de verdad, pero cada consulta arranca un Chromium que come entre 300 MB y 1,5 GB de RAM, tarda de 1 a 3 segundos y, si el sitio está detrás de Cloudflare, te devuelve el desafío igual. Para un agente que consulta cinco páginas por conversación, es un costo que no cierra.</p>
+<p>La tercera es un servidor MCP: un proceso chico que expone funciones ("tools") y que el cliente del agente arranca solo. No hay daemon, no hay puerto, no hay browser. Es la opción que vamos a construir y probar acá, y después te muestro dónde se rompe.</p>
+<h2>Qué es MCP exactamente</h2>
+<p>El Model Context Protocol es JSON-RPC 2.0 sobre stdio. Nada más. El cliente (Claude Desktop, Cursor, Windsurf) lanza tu proceso como hijo y le escribe mensajes de una línea por stdin. Tu servidor contesta por stdout, también una línea por mensaje.</p>
+<p>El ciclo mínimo tiene cuatro mensajes:</p>
+<ul>
+<li><code>initialize</code>: el cliente pregunta versión de protocolo y capabilities.</li>
+<li><code>notifications/initialized</code>: aviso del cliente, no lleva respuesta.</li>
+<li><code>tools/list</code>: el servidor devuelve el catálogo de tools con su JSON Schema.</li>
+<li><code>tools/call</code>: el cliente invoca una tool con argumentos y recibe el contenido.</li>
+</ul>
+<p>Dos reglas que rompen servidores novatos: <strong>stdout es solo protocolo</strong> (un <code>console.log</code> de debug corrompe el stream; los logs van a stderr), y las notificaciones <strong>no llevan <code>id</code></strong>, así que no se responden.</p>
+<h2>El servidor mínimo, funcionando</h2>
+<p>Este archivo es un servidor MCP completo con una sola tool: descargar una URL y devolver su texto visible. Node 18+, cero dependencias.</p>
+<pre><code>
+#!/usr/bin/env node
+// mcp-fetch.mjs — servidor MCP mínimo: una tool que devuelve el texto visible de una URL.
+import { createInterface } from 'node:readline';
+
+const TOOLS = [{
+  name: 'fetch_text',
+  description: 'Descarga una URL y devuelve su texto visible, sin etiquetas HTML.',
+  inputSchema: {
+    type: 'object',
+    properties: { url: { type: 'string', description: 'URL absoluta http(s)' } },
+    required: ['url'],
+  },
+}];
+
+const send = (msg) =&gt; process.stdout.write(JSON.stringify(msg) + '\n');
+
+async function fetchText(url) {
+  const res = await fetch(url, { headers: { 'User-Agent': 'mcp-fetch/1.0' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const html = await res.text();
+  return html
+    .replace(/&lt;script[\s\S]*?&lt;\/script&gt;/gi, ' ')
+    .replace(/&lt;style[\s\S]*?&lt;\/style&gt;/gi, ' ')
+    .replace(/&lt;[^&gt;]+&gt;/g, ' ')
+    .replace(/&amp;nbsp;/g, ' ')
+    .replace(/&amp;amp;/g, '&amp;')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const handlers = {
+  async initialize({ protocolVersion }) {
+    return {
+      protocolVersion: protocolVersion ?? '2025-06-18',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'mcp-fetch', version: '1.0.0' },
+    };
+  },
+  async ping() { return {}; },
+  async 'tools/list'() { return { tools: TOOLS }; },
+  async 'tools/call'({ name, arguments: args }) {
+    if (name !== 'fetch_text') throw new Error(`tool desconocida: ${name}`);
+    const text = await fetchText(args.url);
+    return { content: [{ type: 'text', text }] };
+  },
+};
+
+createInterface({ input: process.stdin }).on('line', async (line) =&gt; {
+  if (!line.trim()) return;
+  let req;
+  try { req = JSON.parse(line); } catch { return; }        // línea rota: se ignora
+  if (req.id === undefined) return;                        // notificación: no lleva respuesta
+  try {
+    const result = await handlers[req.method](req.params ?? {});
+    send({ jsonrpc: '2.0', id: req.id, result });
+  } catch (err) {
+    send({ jsonrpc: '2.0', id: req.id, error: { code: -32603, message: String(err.message ?? err) } });
+  }
+});
+</code></pre>
+<p>Se prueba sin cliente, a mano:</p>
+<pre><code>
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fetch_text","arguments":{"url":"https://example.com"}}}' \
+  | node mcp-fetch.mjs
+</code></pre>
+<p>La primera línea devuelve el catálogo; la segunda, el texto de la página. Si eso responde, el resto es configuración.</p>
+<h2>Conectarlo al cliente</h2>
+<p>En Claude Desktop, el archivo es <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> en macOS y <code>~/.config/Claude/claude_desktop_config.json</code> en Linux. En Cursor va en <code>.cursor/mcp.json</code> dentro del proyecto. El bloque es el mismo:</p>
+<pre><code>
+{
+  "mcpServers": {
+    "fetch": {
+      "command": "node",
+      "args": ["/ruta/absoluta/mcp-fetch.mjs"]
+    }
+  }
+}
+</code></pre>
+<p>Reiniciás el cliente y la tool aparece en el selector. Desde ahí, "traeme el texto de esta URL y resumí los precios" deja de ser una alucinación y pasa a ser una llamada real.</p>
+<h2>Dónde se rompe el juguete de 60 líneas</h2>
+<p>Corrélo contra cinco sitios reales y vas a chocar con esto:</p>
+<ul>
+<li><strong>Sitios que renderizan en el cliente.</strong> Un <code>fetch</code> devuelve el HTML inicial. Si la página es una SPA de React o Next con datos cargados por JS, el texto útil no está ahí: te queda un <code>&lt;div id="root"&gt;</code> vacío. Ahí el headless browser sí era necesario.</li>
+<li><strong>Bloqueos por User-Agent o por IP.</strong> Cloudflare, DataDome y los WAF de e-commerce devuelven 403 o una página de desafío con estado 200. Tu tool entrega "Checking your browser" como si fuera contenido.</li>
+<li><strong>Ruido que se come el contexto.</strong> El <code>replace</code> de etiquetas no distingue artículo de navegación. En una nota de blog de 800 palabras el texto extraído puede traer 3.000 palabras de menú, footer y "suscribite". Eso se paga en tokens y empeora la respuesta.</li>
+<li><strong>Entidades y espacios raros.</strong> <code>&amp;amp;</code>, <code>&amp;#8217;</code> y non-breaking spaces rompen comparaciones de precios y nombres de producto. El ejemplo resuelve dos entidades; el mundo real tiene cientos.</li>
+<li><strong>Una URL por llamada, sin caché.</strong> Cien páginas son cien round-trips al modelo, cada uno con su latencia. Sin caché ni concurrencia, el agente tarda minutos.</li>
+<li><strong>Extracción no determinista.</strong> El modelo re-parsea el mismo HTML en cada corrida. Dos ejecuciones seguidas te dan dos formatos distintos, y el diff de precios deja de significar algo.</li>
+</ul>
+<p>Ninguna de esas fallas es del protocolo. MCP funciona. Lo que falta es el trabajo aburrido: detección de plataforma, parsers por tipo de página, reintentos, proxy y normalización de datos.</p>
+<h2>La versión empaquetada</h2>
+<p>Ese trabajo es lo que hace <code>zabreuit-mcp</code>, un servidor MCP publicado en npm (unas 500 descargas en los últimos 30 días, medido el 4 de noviembre de 2026). Se instala sin clonar nada:</p>
+<pre><code>
+npx -y zabreuit-mcp
+</code></pre>
+<p>Expone cinco tools sobre el mismo protocolo que acabás de ver:</p>
+<ul>
+<li><code>extract_ecommerce</code>: producto desde JSON-LD, microdatos y OpenGraph (Shopify, WooCommerce, Magento, Amazon y cualquier tienda con Schema.org).</li>
+<li><code>extract_leads</code>: contacto B2B desde el sitio de una empresa — emails, links de WhatsApp, redes y huella tecnológica; opcionalmente resuelve MX y SPF por DNS.</li>
+<li><code>extract_markdown_rag</code>: convierte artículos y documentación en Markdown limpio con <code>chunkSize</code> configurable, para indexar sin arrastrar navegación.</li>
+<li><code>audit_technical_seo</code>: título, meta description, canonical, directivas robots, tarjetas OpenGraph/Twitter y cabeceras de seguridad (HSTS, CSP, X-Frame-Options).</li>
+<li><code>list_pro_presets</code> y <code>extract_preset_pro</code>: 100 presets comerciales por plataforma. Buscar el catálogo es libre; ejecutar un preset requiere licencia (<code>ZABREUIT_LICENSE_KEY</code>).</li>
+</ul>
+<p>La configuración es la misma que la del ejemplo, cambiando el comando:</p>
+<pre><code>
+{
+  "mcpServers": {
+    "zabreuit": {
+      "command": "npx",
+      "args": ["-y", "zabreuit-mcp"],
+      "env": { "ZABREUIT_LICENSE_KEY": "" }
+    }
+  }
+}
+</code></pre>
+<p>La diferencia práctica no es la velocidad del fetch: es que la salida viene estructurada y estable. El agente recibe un objeto con precio, SKU y stock en vez de 40 KB de HTML para interpretar. Eso es lo que hace que una comparación de precios se pueda repetir mañana y dé el mismo esquema.</p>
+<h2>Límites honestos</h2>
+<p>No hace login, no resuelve captchas y no renderiza SPAs que dependen de JavaScript para pintar el contenido; para esos casos sigue haciendo falta un browser real. Tampoco reemplaza un pipeline de scraping a escala: si necesitás 50.000 páginas por día con proxy rotativo e historial, esto es una pieza, no la solución completa.</p>
+<p>Si tu volumen es una docena de URLs por conversación, el servidor de 60 líneas de arriba alcanza y no necesitás nada más. Cuando empezás a escribir parsers por sitio y a manejar 403, ahí el paquete te ahorra el mantenimiento.</p>
+<p>Los diez extractores que uso para dejar contenido listo para un agente —sitemap a Markdown, docs de GitBook/Docusaurus, <code>llms.txt</code>, páginas de precios, Wikipedia, arXiv, foros y blogs técnicos— están en <a href="https://gumroad.com/l/zabreuit-pack-07"><strong>AI &amp; RAG Content Pipeline</strong></a> (Gumroad, USD 79): es el pack que corresponde cuando el problema es la ingesta y no el transporte.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-07">AI &amp; RAG Content Pipeline — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>

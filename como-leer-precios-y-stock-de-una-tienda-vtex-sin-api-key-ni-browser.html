@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo leer precios y stock de una tienda VTEX sin API key ni browser</title>
+<meta name="description" content="Las tiendas VTEX publican catálogo y precios en JSON sin autenticación. Endpoint, paginación de 50, canal de venta y las trampas medidas en tiendas reales.">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-11</p><h1>Cómo leer precios y stock de una tienda VTEX sin API key ni browser</h1>
+<p>Las tiendas VTEX publican catálogo y precios en JSON sin autenticación. Endpoint, paginación de 50, canal de venta y las trampas medidas en tiendas reales.</p>
+<p>La misma oblea cuesta distinto según el banner. Hoy, 11 de noviembre de 2026, consulté el catálogo público de Jumbo, Disco y Vea buscando el mismo EAN —7891000248799, Oblea KitKat 4 Fingers— y salieron tres precios: 3.000, 3.050 y 2.890 pesos. Mismo producto, mismo grupo empresario, 5,5% de diferencia entre el más caro y el más barato, y ninguna de las tres páginas lo muestra.</p>
+<p>Ese es el trabajo real de un monitor de precios en LatAm: no leer un precio, sino sostener la lectura de cientos de SKUs repartidos en varias tiendas y canales, con el mismo identificador y en el mismo momento. Para VTEX no hace falta ni API key ni browser.</p>
+<h2>Por qué el JSON está a la vista</h2>
+<p>VTEX es la plataforma de e-commerce enterprise más extendida de la región: farmacias, supermercados, retail de electrónica, marketplaces. El storefront de VTEX IO se renderiza en el cliente, así que el HTML que devuelve el servidor trae el precio de la primera pintura: una página, un canal de venta, sin el total de resultados y sin los otros vendedores del mismo ítem.</p>
+<p>El catálogo, en cambio, está publicado como JSON en una ruta fija, sin autenticación, sin cookie y sin token:</p>
+<pre><code>
+curl "https://www.jumbo.com.ar/api/catalog_system/pub/products/search/?ft=kitkat&amp;_from=0&amp;_to=9"
+</code></pre>
+<p>Eso devuelve un array de productos con precio, stock, EAN y vendedor. La ruta se repite en los dominios VTEX que probé: <code>jumbo.com.ar</code>, <code>disco.com.ar</code>, <code>vea.com.ar</code>, <code>fravega.com</code>, <code>cetrogar.com.ar</code> y <code>farmacity.com</code>.</p>
+<h2>La estructura que importa</h2>
+<p>Cada producto del array trae un objeto <code>items[]</code> (variantes) y cada ítem trae <code>sellers[]</code>. El precio no está en el producto: está en la oferta comercial de cada vendedor.</p>
+<pre><code>
+{
+  "productId": "241361",
+  "productName": "Oblea Leche 4 Fingers 41.5 Grs Kitkat®",
+  "linkText": "oblea-leche-4-fingers-41-5-grs-kitkat-2",
+  "items": [{
+    "ean": "7891000248799",
+    "unitMultiplier": 1,
+    "sellers": [{
+      "sellerName": "Jumbo Argentina IO",
+      "commertialOffer": {
+        "Price": 3000,
+        "PriceWithoutDiscount": 3000,
+        "ListPrice": 3000,
+        "IsAvailable": true,
+        "AvailableQuantity": 99999
+      }
+    }]
+  }]
+}
+</code></pre>
+<p>Cuatro cosas de ahí, en orden de importancia:</p>
+<ul>
+<li><code>Price</code> viene en unidades de la moneda, no en centavos: <code>5900</code> es ARS 5.900. Y viene con decimales reales (<code>6114.05</code>), así que no lo redondees al leer.</li>
+<li><code>IsAvailable</code> y <code>AvailableQuantity</code> son del vendedor, no de la tienda. Un ítem puede estar publicado y no tener stock.</li>
+<li><code>unitMultiplier</code> cambia la unidad. En "Banana Ecuador X Kg" medí <code>0.5</code>: el precio es por medio kilo. Si multiplicás por el tamaño del pack sin mirar este campo, el precio unitario sale mal.</li>
+<li>El <code>productId</code> solo es único dentro de la cuenta. Para cruzar cadenas distintas el identificador es el <code>ean</code>.</li>
+</ul>
+<h2>Las trampas que aparecen en la primera hora</h2>
+<p>Todas las siguientes las choqué midiendo, no leyendo documentación.</p>
+<p><strong>301 entre dominios.</strong> <code>farmacity.com.ar</code> redirige a <code>farmacity.com</code>. Con <code>curl</code> sin <code>-L</code> recibís un 301 con cuerpo vacío y parece que la API no existe. <code>fetch</code> sigue redirecciones por defecto; <code>curl</code> no.</p>
+<p><strong>La respuesta es 206, no 200.</strong> La cabecera <code>resources</code> confirma el rango servido. Si tu chequeo es <code>status === 200</code>, el script se cae en la primera llamada. Usá <code>res.ok</code>, que cubre 200 y 206.</p>
+<p><strong><code>_to</code> no pasa de 49.</strong> Pedir <code>_to=50</code> devuelve HTTP 400 con el texto exacto <code>"Parameter _to can't be greater than 50."</code> Son 50 productos por request, ni uno más.</p>
+<p><strong><code>_from</code> se corta en 2500.</strong> Arriba de eso: <code>"Parameter _from can't be greater than 2500."</code> Una búsqueda con 2.669 resultados —"celular" en Frávega— no se puede recorrer con una sola query. Hay que partir por categoría, marca o rango de precio.</p>
+<p><strong>El canal de venta cambia el resultado, y falla en silencio.</strong> En Farmacity, <code>?fq=productId:240916</code> sin <code>sc</code> devuelve el producto; con <code>sc=1</code> devuelve <code>[]</code> y HTTP 200. Un array vacío no es un error: es la peor forma de fallar. Si tu monitor usa canales de venta, guardalos en la config y probá cada uno.</p>
+<p><strong>Un vendedor sin stock reporta precio 0.</strong> En un celular de Frávega aparecieron dos ofertas: <code>MaxiHome</code> a 97.799 con stock 100 y <code>Frávega</code> a 0 con stock 0. Tomar <code>sellers[0]</code> sin filtrar mete un cero en el promedio y te hace concluir que el precio se derrumbó.</p>
+<p><strong><code>ListPrice</code> viene inconsistente.</strong> En un ítem de Jumbo medí <code>Price: 999</code> junto a <code>ListPrice: 90407</code>, un valor que no corresponde a ningún precio de lista plausible. Para comparar sirve <code>Price</code>; para detectar descuento, <code>PriceWithoutDiscount</code>.</p>
+<p><strong>Caché de cinco minutos.</strong> La respuesta trae <code>x-vtex-apicache-time: 300</code>. Un cron cada 60 segundos golpea la misma copia y no ve nada nuevo.</p>
+<p><strong>El WAF no es VTEX.</strong> <code>nike.com.ar</code> responde 403 con la página "Just a moment..." de Cloudflare sobre la misma ruta. Es el WAF delante del sitio. Reintentar más fuerte empeora las cosas.</p>
+<h2>El script</h2>
+<p>Node 18+, cero dependencias. Itera de a 50, corta en el total que informa la cabecera <code>resources</code> (<code>0-9/112</code> significa "te di 10 de 112"), descarta vendedores sin stock y emite CSV para abrir en Sheets.</p>
+<pre><code>
+const [, , base, query = "", max = "200"] = process.argv;
+const sleep = (ms) =&gt; new Promise((r) =&gt; setTimeout(r, ms));
+const csv = (v) =&gt; `"${String(v ?? "").replace(/"/g, '""')}"`;
+
+async function page(from) {
+  const url = `${base}/api/catalog_system/pub/products/search/?ft=${encodeURIComponent(query)}&amp;_from=${from}&amp;_to=${from + 49}`;
+  for (let attempt = 1; attempt &lt;= 3; attempt++) {
+    const res = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "price-check/1.0" } });
+    if (res.ok) {
+      const total = Number(res.headers.get("resources")?.split("/")[1] ?? 0);
+      return { products: await res.json(), total };
+    }
+    if (res.status === 400) throw new Error(`${res.status}: ${await res.text()}`);
+    await sleep(800 * attempt);
+  }
+  throw new Error(`sin respuesta para _from=${from}`);
+}
+
+const rows = [];
+let from = 0;
+while (from &lt;= 2500 &amp;&amp; rows.length &lt; Number(max)) {
+  const { products, total } = await page(from);
+  for (const p of products) {
+    for (const item of p.items ?? []) {
+      for (const s of item.sellers ?? []) {
+        const offer = s.commertialOffer ?? {};
+        if (!offer.IsAvailable || !(offer.Price &gt; 0)) continue;
+        rows.push([base.replace(/^https?:\/\//, ""), p.productId, item.ean || "",
+          p.productName, s.sellerName, offer.Price, offer.AvailableQuantity,
+          `${base}/${p.linkText}/p`]);
+      }
+    }
+  }
+  from += 50;
+  if (from &gt;= total) break;
+  await sleep(300);
+}
+
+console.log(["tienda", "productId", "ean", "nombre", "vendedor", "precio", "stock", "url"].join(","));
+for (const r of rows) console.log(r.map(csv).join(","));
+</code></pre>
+<p>Correrlo contra las tres cadenas deja los precios uno al lado del otro:</p>
+<pre><code>
+node vtex-prices.mjs https://www.jumbo.com.ar kitkat &gt; jumbo.csv
+node vtex-prices.mjs https://www.disco.com.ar kitkat &gt; disco.csv
+node vtex-prices.mjs https://www.vea.com.ar  kitkat &gt; vea.csv
+</code></pre>
+<p>Y el cruce por EAN da la tabla que ninguna tienda te muestra:</p>
+<pre><code>
+EAN              Producto                            Jumbo   Disco   Vea
+7891000248799    Oblea Leche 4 Fingers 41.5 Grs      3.000   3.050   2.890
+7891000379028    Oblea White 4 Fingers 41.5 Grs      3.000   3.050   2.890
+</code></pre>
+<p>Del más barato al más caro hay 5,5%. Si vendés ese producto y tu precio de referencia es el de Vea, estás 5,5% arriba en Disco sin haberlo decidido.</p>
+<h2>Dónde esto no alcanza</h2>
+<ul>
+<li><strong>Tiendas con la ruta desactivada.</strong> Algunas cuentas cierran el catálogo público: 403 o 404 en la ruta. Ahí no hay atajo, toca sitemap + JSON-LD o la API oficial con credenciales.</li>
+<li><strong>Catálogos grandes.</strong> El tope de <code>_from</code> en 2500 obliga a segmentar. Un supermercado con 40.000 SKUs son decenas de queries por categoría, no una.</li>
+<li><strong>Solo catálogo público.</strong> No hay checkout, no hay precios con login, no hay listas B2B. Para precios por cliente la ruta es otra y requiere credenciales del retailer.</li>
+<li><strong>Cortesía mínima.</strong> Un request cada 300 ms con tres reintentos y un <code>User-Agent</code> identificable alcanza. Machacar el endpoint es la forma más rápida de que te bloqueen y de romper el sitio para el resto.</li>
+<li><strong>Reglas de cada sitio.</strong> Es data pública de catálogo, pero cada tienda tiene sus términos y su <code>robots.txt</code>. Revisalos antes de programar un cron: en Jumbo, Disco y Vea el bloqueo alcanza a <code>/Busca/</code>, <code>/login</code> y <code>/checkout</code>, no a la ruta de la API. Eso puede cambiar sin aviso.</li>
+</ul>
+<p>Si el problema es un SKU o una tienda, el script de arriba sobra. Cuando son ocho plataformas —VTEX, Shopify, WooCommerce, Magento, Tiendanube, MercadoLibre, PrestaShop, BigCommerce— con el mismo esquema de salida, la parte que se come el tiempo deja de ser el fetch y pasa a ser normalizar cada catálogo sin perder el EAN ni el stock por vendedor. Eso es lo que empaqueté en <a href="https://gumroad.com/l/zabreuit-pack-01"><strong>E-commerce Intelligence — Vol. 1</strong></a> (Gumroad, USD 79); si solo te interesa VTEX, el extractor suelto está en <a href="https://gumroad.com/l/vtex-ecommerce-catalog-price-scraper">VTEX E-commerce Catalog &amp; Regional Price Scraper</a>. Y si lo que necesitás es consultarlo desde un agente, <code>npx -y zabreuit-mcp</code> expone el mismo tipo de extracción como tool de MCP.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-01">E-commerce Intelligence — Vol. 1 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>

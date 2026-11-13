@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo auditar SEO y OpenGraph de 100 URLs en una corrida (sin crawler de pago)</title>
+<meta name="description" content="Auditar 100 URLs a mano no es lento: es imposible de repetir el mes siguiente sin olvidarse la mitad de los campos.">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-02</p><h1>Cómo auditar SEO y OpenGraph de 100 URLs en una corrida (sin crawler de pago)</h1>
+<p>Auditar 100 URLs a mano no es lento: es imposible de repetir el mes siguiente sin olvidarse la mitad de los campos.</p>
+<p>El pedido típico llega así: una agencia cierra una auditoría de e-commerce y necesita revisar 100 URLs</p>
+<p>—fichas de producto, categorías, landings de campaña— antes de la reunión del viernes. Los datos que</p>
+<p>piden son aburridos y siempre los mismos: estado HTTP, title, meta description, un solo H1, canonical,</p>
+<p>robots, imagen de OpenGraph y alts de las imágenes.</p>
+<p>La herramienta de escritorio que todos usan cuesta una licencia por asiento, y el plan gratuito corta a</p>
+<p>500 URLs, que parece suficiente hasta que el cliente suma un segundo dominio y una migración. Además,</p>
+<p>la mitad del equipo no tiene la herramienta instalada. El resultado conocido: alguien abre las URLs en</p>
+<p>pestañas, copia títulos a una planilla y el reporte sale con 60 filas de 100.</p>
+<p>Lo que sigue es un script de 80 líneas, sin dependencias, que hace ese trabajo en una corrida y deja un</p>
+<p>CSV comparable entre meses. Después explico qué no cubre, porque ahí es donde se rompen las promesas.</p>
+<h2>Los cinco errores que aparecen siempre en una muestra de 100 URLs</h2>
+<p>Antes del código, el checklist real. En una muestra de cien páginas de un e-commerce mediano, estos son</p>
+<p>los hallazgos que se repiten:</p>
+<p>1. <strong>Canonical cruzado.</strong> La ficha apunta su canonical a la categoría "para no duplicar contenido".</p>
+<p>   Google termina indexando la categoría y la ficha desaparece del índice.</p>
+<p>2. <strong><code>noindex</code> heredado del staging.</strong> El sitio se lanzó copiando la configuración de pruebas. La home</p>
+<p>   está indexada, las 400 fichas no. Nadie lo ve porque el <code>robots.txt</code> sí está bien.</p>
+<p>3. <strong>OpenGraph a medias.</strong> Hay <code>og:title</code>, falta <code>og:image</code>. El link se comparte en WhatsApp o LinkedIn</p>
+<p>   sin miniatura, y quien lo manda no se entera.</p>
+<p>4. <strong>Tres H1 por página.</strong> Uno del logo, uno del título, uno del banner. No es una penalización directa,</p>
+<p>   pero rompe la jerarquía que el equipo de contenido cree que tiene.</p>
+<p>5. <strong>Cadena de redirects.</strong> <code>http → https</code>, <code>sin www → con www</code> y una regla vieja del CMS en el medio.</p>
+<p>   Cada salto gasta tiempo de rastreo y el status final no es el que reporta la herramienta si solo</p>
+<p>   mira el primero.</p>
+<p>Ninguno de estos se detecta mirando una página. Se detectan mirando cien y contando.</p>
+<h2>El script</h2>
+<p>Node 18 o superior ya trae <code>fetch</code>. No hace falta instalar nada, ni abrir un navegador headless.</p>
+<pre><code>
+// seo-audit.mjs — uso: node seo-audit.mjs urls.txt reporte.csv
+import { readFile, writeFile } from 'node:fs/promises';
+
+const [, , listPath, out = 'reporte.csv'] = process.argv;
+if (!listPath) {
+  console.error('Uso: node seo-audit.mjs urls.txt [salida.csv]');
+  process.exit(1);
+}
+
+const urls = (await readFile(listPath, 'utf8'))
+  .split('\n')
+  .map((l) =&gt; l.trim())
+  .filter((l) =&gt; l &amp;&amp; !l.startsWith('#'));
+
+const UA = 'seo-audit/1.0 (+contacto@tudominio.com)';
+
+/** Lee un atributo de una etiqueta HTML, con comillas simples o dobles. */
+function attr(tag, name) {
+  const m = tag.match(new RegExp(`\\b${name}\\s*=\\s*("([^"]*)"|'([^']*)')`, 'i'));
+  return m ? (m[2] ?? m[3] ?? '').trim() : '';
+}
+
+function metas(html) {
+  const map = new Map();
+  for (const tag of html.match(/&lt;meta\b[^&gt;]*&gt;/gi) ?? []) {
+    const key = (attr(tag, 'name') || attr(tag, 'property')).toLowerCase();
+    if (key &amp;&amp; !map.has(key)) map.set(key, attr(tag, 'content'));
+  }
+  return map;
+}
+
+function canonicalOf(html) {
+  for (const tag of html.match(/&lt;link\b[^&gt;]*&gt;/gi) ?? []) {
+    if (attr(tag, 'rel').toLowerCase() === 'canonical') return attr(tag, 'href') || '';
+  }
+  return '';
+}
+
+async function fetchChain(url) {
+  let current = url;
+  let hops = 0;
+  for (; hops &lt;= 5; hops++) {
+    const res = await fetch(current, {
+      redirect: 'manual',
+      headers: { 'user-agent': UA },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (res.status &gt;= 300 &amp;&amp; res.status &lt; 400) {
+      const loc = res.headers.get('location');
+      if (!loc) return { res, current, hops };
+      current = new URL(loc, current).toString();
+      continue;
+    }
+    return { res, current, hops };
+  }
+  throw new Error('más de 5 redirects');
+}
+
+const rows = [];
+for (const url of urls) {
+  try {
+    const { res, current, hops } = await fetchChain(url);
+    const html = (await res.text()).slice(0, 400000);
+    const meta = metas(html);
+    const title = (html.match(/&lt;title[^&gt;]*&gt;([\s\S]*?)&lt;\/title&gt;/i)?.[1] ?? '').replace(/\s+/g, ' ').trim();
+    const ogImage = meta.get('og:image') ?? '';
+
+    const imgs = html.match(/&lt;img\b[^&gt;]*&gt;/gi) ?? [];
+    const noAlt = imgs.filter((tag) =&gt; !attr(tag, 'alt')).length;
+
+    const issues = [];
+    if (res.status &gt;= 400) issues.push(`HTTP_${res.status}`);
+    if (!title) issues.push('SIN_TITLE');
+    else if (title.length &gt; 60) issues.push('TITLE_LARGO');
+    if (!meta.get('description')) issues.push('SIN_DESCRIPTION');
+    if (!ogImage) issues.push('SIN_OG_IMAGE');
+    if (!meta.get('og:title')) issues.push('SIN_OG_TITLE');
+    if ((html.match(/&lt;h1\b/gi) ?? []).length !== 1) issues.push('H1_COUNT');
+    if (/noindex/i.test(meta.get('robots') ?? '')) issues.push('NOINDEX');
+    if (!canonicalOf(html)) issues.push('SIN_CANONICAL');
+    if (hops &gt; 0) issues.push('REDIRECT');
+    if (noAlt &gt; 0) issues.push('IMG_SIN_ALT');
+
+    rows.push({
+      url,
+      status: res.status,
+      final: current,
+      hops,
+      title,
+      title_len: title.length,
+      description_len: (meta.get('description') ?? '').length,
+      h1: (html.match(/&lt;h1\b/gi) ?? []).length,
+      canonical: canonicalOf(html),
+      robots: meta.get('robots') ?? '',
+      og_image: ogImage ? new URL(ogImage, current).toString() : '',
+      imgs: imgs.length,
+      imgs_sin_alt: noAlt,
+      issues: issues.join(' '),
+    });
+  } catch (err) {
+    rows.push({ url, status: 'ERROR', final: url, hops: '', issues: String(err.message || err) });
+  }
+  await new Promise((r) =&gt; setTimeout(r, 150)); // cortesía con el origen
+}
+
+const headers = ['url', 'status', 'final', 'hops', 'title', 'title_len', 'description_len', 'h1',
+  'canonical', 'robots', 'og_image', 'imgs', 'imgs_sin_alt', 'issues'];
+const cell = (v) =&gt; `"${String(v ?? '').replace(/"/g, '""')}"`;
+const csv = [headers.join(','), ...rows.map((r) =&gt; headers.map((h) =&gt; cell(r[h])).join(','))].join('\n');
+
+await writeFile(out, csv, 'utf8');
+const conProblemas = rows.filter((r) =&gt; r.issues).length;
+console.log(`${rows.length} URLs · ${conProblemas} con hallazgos → ${out}`);
+</code></pre>
+<p>Se corre así:</p>
+<pre><code>
+printf '%s\n' \
+  https://tienda.com/products/remera-negra \
+  https://tienda.com/collections/ofertas \
+  https://tienda.com/pages/black-friday &gt; urls.txt
+
+node seo-audit.mjs urls.txt reporte.csv
+</code></pre>
+<p>Con el CSV abierto en una planilla, la columna <code>issues</code> se filtra y el reporte de la reunión sale solo:</p>
+<p>cuántas fichas sin <code>og:image</code>, cuántas con <code>noindex</code>, cuántas con más de un H1.</p>
+<h2>Por qué <code>redirect: 'manual'</code> es la línea que importa</h2>
+<p>Si dejás que <code>fetch</code> siga los redirects solo, te devuelve el status final y perdés el dato que el</p>
+<p>cliente pregunta primero: <strong>cuántos saltos hay antes de llegar</strong>. Con <code>manual</code>, el script guarda cada</p>
+<p><code>Location</code>, reconstruye la URL absoluta con <code>new URL(loc, current)</code> —necesario porque muchos servidores</p>
+<p>devuelven rutas relativas— y cuenta los saltos.</p>
+<p>Dos detalles operativos del mismo bloque:</p>
+<ul>
+<li><strong>El corte a 5 saltos</strong> evita el loop de reglas mal escritas. Un <code>ERR_TOO_MANY_REDIRECTS</code> en el</li>
+</ul>
+<p>  navegador también existe en un script, y sin corte se cuelga la corrida completa.</p>
+<ul>
+<li><strong><code>AbortSignal.timeout(20000)</code></strong> es lo que separa 100 URLs en 40 segundos de una corrida trabada 20</li>
+</ul>
+<p>  minutos en el dominio que no responde. Sin timeout, una sola URL muerta arruina el lote.</p>
+<h2>Lo que este script no ve</h2>
+<p>Ser explícito acá es más útil que el código, porque define cuándo el script deja de alcanzar:</p>
+<ul>
+<li><strong>Páginas que se renderizan con JavaScript.</strong> <code>fetch</code> trae el HTML inicial. Si el <code>&lt;title&gt;</code> y los</li>
+</ul>
+<p>  productos se inyectan en el cliente, el script va a reportar <code>SIN_TITLE</code> en páginas que en el</p>
+<p>  navegador están perfectas. Antes de acusar al cliente, abrí una URL en el navegador con JS</p>
+<p>  deshabilitado y compará.</p>
+<ul>
+<li><strong>Bloqueos anti-bot.</strong> Cloudflare y similares devuelven 403 o un challenge. Eso no es un hallazgo de</li>
+</ul>
+<p>  SEO: es el sitio defendiéndose de un request sin navegador. Va a la columna <code>issues</code> como <code>HTTP_403</code></p>
+<p>  y hay que leerlo con criterio.</p>
+<ul>
+<li><strong>Core Web Vitals.</strong> LCP, INP y CLS requieren datos de usuarios reales o un laboratorio. Un request</li>
+</ul>
+<p>  HTTP no mide render.</p>
+<ul>
+<li><strong>Renderizado social.</strong> Acá solo se verifica que las etiquetas <code>og:*</code> existan. Cómo se ve la tarjeta en</li>
+</ul>
+<p>  WhatsApp depende de que la imagen pese poco, tenga la proporción correcta y esté accesible sin login.</p>
+<ul>
+<li><strong>Contenido duplicado entre páginas.</strong> Eso necesita comparar textos, no leer metadatos.</li>
+</ul>
+<h2>Cuándo el script deja de convenir</h2>
+<p>El script hace una corrida de 100 URLs en menos de un minuto y no cuesta nada. El problema aparece con</p>
+<p>el uso real de una agencia: 40 dominios por mes, un CSV por dominio, reintentos cuando el origen</p>
+<p>devuelve 429, proxy cuando el sitio bloquea, y alguien que se acuerde de correrlo el día que corresponde.</p>
+<p>Ahí el trabajo deja de ser escribir el script y pasa a ser mantenerlo. Para ese caso existe el actor</p>
+<p><a href="https://apify.com/joseabreuy/seo-opengraph-bulk-technical-auditor"><strong>SEO &amp; OpenGraph Bulk Technical Auditor</strong></a></p>
+<p>en Apify: recibe una lista de URLs, resuelve proxy y reintentos, y devuelve por URL el status, title,</p>
+<p>description, jerarquía H1–H3, canonical, robots, imágenes sin <code>alt</code>, el estado de OpenGraph y los</p>
+<p>headers de seguridad (HSTS, CSP, X-Frame-Options), con un score y una lista de issues. Cobra por evento</p>
+<p>—USD 1,50 por 1.000 URLs auditadas— y se puede correr desde la consola, por API o como tool de MCP.</p>
+<p>Si lo que necesitás es el kit completo, el pack <strong>SEO &amp; Web Health Auditors</strong> reúne diez auditores en</p>
+<p>bulk (SEO/OpenGraph, redirects y 404, Schema.org, hreflang, robots, headers/SSL, WCAG, cookies,</p>
+<p>ads.txt, DNS/RDAP): &lt;https://gumroad.com/l/zabreuit-pack-09&gt;.</p>
+<p>Un consejo honesto: corré el script de esta página contra el dominio que tenés que entregar el viernes.</p>
+<p>Si el CSV te alcanza para el informe, ya está. Si a la tercera corrida te encontrás escribiendo</p>
+<p>reintentos para los 403 y ordenando carpetas por cliente, ahí el actor o el pack se pagan solos.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-09">SEO &amp; Web Health Auditors — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>

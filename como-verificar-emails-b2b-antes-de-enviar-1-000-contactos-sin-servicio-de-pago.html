@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo verificar emails B2B antes de enviar 1.000 contactos (sin servicio de pago)</title>
+<meta name="description" content="Una lista de 1.000 contactos B2B se rompe en el primer envío: el proveedor frena la cuenta y el dominio">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-04</p><h1>Cómo verificar emails B2B antes de enviar 1.000 contactos (sin servicio de pago)</h1>
+<p>Una lista de 1.000 contactos B2B se rompe en el primer envío: el proveedor frena la cuenta y el dominio</p>
+<p>nuevo queda marcado.</p>
+<p>Lo caro es descubrirlo después de enviar. El caso típico: una agencia arma una base desde sitios de</p>
+<p>empresas y formularios viejos, la importa al CRM y manda todo junto. El proveedor acepta, devuelve rebotes y pausa la cuenta "hasta que se limpie la</p>
+<p>lista". Ahí empieza la tarea previa: separar qué dominios reciben correo y cuáles van a rebotar.</p>
+<p>Un script corto, sin dependencias, hace ese filtro con DNS. Después explico qué no cubre y cómo medir la</p>
+<p>tasa de rebote real en vez de estimarla.</p>
+<h2>Los errores que aparecen siempre en una lista de 1.000</h2>
+<p>1. <strong>Sintaxis que pasa el regex pero el servidor rechaza.</strong> Un punto al final, dos arrobas, un guion bajo</p>
+<p>   en el dominio: el regex acepta y el MX no existe.</p>
+<p>2. <strong>Dominio sin MX ni registro A.</strong> Se compró para el sitio y nunca se configuró el correo: el rebote más</p>
+<p>   común y el más fácil de detectar.</p>
+<p>3. <strong>Catch-all tratado como válido.</strong> El servidor acepta <em>cualquier</em> dirección de ese dominio: un chequeo</p>
+<p>   SMTP responde "entregable" para <code>cualquiercosa@empresa.com</code>. Lo honesto es marcar el dominio.</p>
+<p>4. <strong>Dominios desechables.</strong> <code>mailinator.com</code> y parientes, que entran desde formularios y exportaciones.</p>
+<p>   Nunca van a leer nada.</p>
+<p>5. <strong>Cuentas de rol.</strong> <code>info@</code>, <code>ventas@</code>, <code>no-reply@</code>: no son inválidas, pero bajan la respuesta. Se</p>
+<p>   etiquetan, no se borran.</p>
+<p>6. <strong>Typo del proveedor.</strong> <code>gmai.com</code>, <code>hotmal.com</code>. El dominio existe y recibe correo: el rebote no lo</p>
+<p>   delata.</p>
+<p>7. <strong>Duplicados que el CRM no ve.</strong> <code>Juan@empresa.com</code> y <code>juan@empresa.com</code>, o <code>juan+news@</code>. El mismo</p>
+<p>   buzón dos veces infla la lista y duplica el riesgo de queja.</p>
+<p>Ninguno se detecta mirando la lista: se detectan consultando DNS, gratis y sin enviar nada.</p>
+<h2>El script</h2>
+<p>Node 18 o superior, solo <code>node:dns/promises</code>: no hay <code>npm install</code>.</p>
+<pre><code>
+// email-preflight.mjs — uso: node email-preflight.mjs emails.txt salida.csv
+import { readFile, writeFile } from 'node:fs/promises';
+import { resolveMx, resolve4, resolveTxt } from 'node:dns/promises';
+
+const [, , listPath, out = 'emails.csv'] = process.argv;
+if (!listPath) { console.error('Uso: node email-preflight.mjs emails.txt [salida.csv]'); process.exit(1); }
+
+// Lista corta: los descartables rotan seguido.
+const DESECHABLES = new Set(['mailinator.com', 'guerrillamail.com', '10minutemail.com', 'tempmail.com',
+  'yopmail.com', 'trashmail.com', 'sharklasers.com', 'getnada.com']);
+const ROL = new Set(['info', 'ventas', 'sales', 'contacto', 'contact', 'admin', 'soporte', 'support',
+  'hola', 'hello', 'noreply', 'no-reply', 'postmaster', 'webmaster']);
+const PROVEEDORES = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'icloud.com', 'live.com'];
+const RE = /^[^\s@]+@[^\s@.]+(\.[^\s@.]+)+$/;
+
+function distancia(a, b) {
+  let prev = [...Array(b.length + 1).keys()];
+  for (let i = 1; i &lt;= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j &lt;= b.length; j++)
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+async function txt(name) {
+  try { return (await resolveTxt(name)).map((r) =&gt; r.join('')); } catch { return []; }
+}
+
+async function revisarDominio(dominio) {
+  const [mx, a, raiz, dmarcTxt] = await Promise.all([
+    resolveMx(dominio).catch(() =&gt; []),
+    resolve4(dominio).catch(() =&gt; []),
+    txt(dominio),
+    txt(`_dmarc.${dominio}`),
+  ]);
+  const dmarc = dmarcTxt.find((t) =&gt; /^v=dmarc1\b/i.test(t)) ?? '';
+  return {
+    mx: mx.sort((x, y) =&gt; x.priority - y.priority).map((m) =&gt; m.exchange.replace(/\.$/, '')),
+    tieneA: a.length &gt; 0,
+    spf: raiz.some((t) =&gt; /^v=spf1\b/i.test(t)),
+    dmarc: (dmarc.match(/\bp\s*=\s*(none|quarantine|reject)/i)?.[1] ?? '').toLowerCase(),
+  };
+}
+
+const lineas = (await readFile(listPath, 'utf8')).split('\n').map((l) =&gt; l.trim().toLowerCase())
+  .filter((l) =&gt; l &amp;&amp; !l.startsWith('#'));
+const vistos = new Set(['']), cache = new Map(), filas = [];
+
+for (const email of lineas) {
+  if (vistos.has(email)) continue;
+  vistos.add(email);
+  const [buzon, dominio = ''] = email.split('@');
+  const fila = { email, dominio, mx: '', veredicto: 'SINTAXIS', notas: '' };
+
+  if (RE.test(email) &amp;&amp; email.length &lt;= 254) {
+    if (!cache.has(dominio)) cache.set(dominio, revisarDominio(dominio));
+    const d = await cache.get(dominio);
+    fila.mx = d.mx.length ? d.mx[0] : d.tieneA ? '(A implícito)' : '';
+    if (DESECHABLES.has(dominio)) fila.veredicto = 'DESECHABLE';
+    else if (!d.mx.length &amp;&amp; !d.tieneA) fila.veredicto = 'SIN_MX';
+    else fila.veredicto = 'RECIBE';
+
+    const notas = [];
+    if (ROL.has(buzon)) notas.push('rol');
+    if (buzon.includes('+')) notas.push('alias');
+    if (PROVEEDORES.some((p) =&gt; p !== dominio &amp;&amp; distancia(dominio, p) &lt;= 2)) notas.push('typo?');
+    if (!d.spf) notas.push('sin-spf');
+    if (!d.dmarc) notas.push('sin-dmarc');
+    else if (d.dmarc === 'none') notas.push('dmarc-none');
+    fila.notas = notas.join(' ');
+  }
+  filas.push(fila);
+  await new Promise((r) =&gt; setTimeout(r, 30));
+}
+
+const headers = ['email', 'dominio', 'mx', 'veredicto', 'notas'];
+const cell = (v) =&gt; `"${String(v ?? '').replace(/"/g, '""')}"`;
+const csv = [headers.join(','), ...filas.map((f) =&gt; headers.map((h) =&gt; cell(f[h])).join(','))].join('\n');
+await writeFile(out, csv, 'utf8');
+
+const cuenta = (v) =&gt; filas.filter((f) =&gt; f.veredicto === v).length;
+console.log(`${filas.length} únicos · RECIBE ${cuenta('RECIBE')} · SIN_MX ${cuenta('SIN_MX')} · ` +
+  `DESECHABLE ${cuenta('DESECHABLE')} · SINTAXIS ${cuenta('SINTAXIS')} → ${out}`);
+</code></pre>
+<p>Se corre así:</p>
+<pre><code>
+printf '%s\n' juan@estudio-sur.com.ar info@logistica-norte.com ventas@gmai.com &gt; emails.txt
+node email-preflight.mjs emails.txt salida.csv
+</code></pre>
+<p>La columna <code>veredicto</code> ordena el trabajo: <code>SIN_MX</code> y <code>DESECHABLE</code> se borran, <code>SINTAXIS</code> se corrige a</p>
+<p>mano; <code>RECIBE</code> con <code>rol</code> va a otra secuencia.</p>
+<h2>Tres detalles que importan</h2>
+<ul>
+<li><strong>Caché por dominio.</strong> Mil contactos pueden salir de ochenta dominios: sin caché el script hace mil</li>
+</ul>
+<p>  consultas en vez de ochenta y el resolver público devuelve <code>SERVFAIL</code>.</p>
+<ul>
+<li><strong>Registro A como respaldo del MX.</strong> Por la RFC 5321, sin MX el correo va al registro A; marcarlos</li>
+</ul>
+<p>  <code>SIN_MX</code> te hace borrar contactos válidos.</p>
+<ul>
+<li><strong>SPF y DMARC del dominio.</strong> No dicen si el buzón existe, pero sí cuánto pesa tu envío.</li>
+</ul>
+<h2>Por qué acá no hay verificación SMTP</h2>
+<p>Para saber si un buzón existe hay que hablar SMTP: puerto 25, <code>RCPT TO:&lt;buzon&gt;</code>, leer el código.</p>
+<p>1. <strong>El puerto 25 suele estar bloqueado.</strong> Hostings y conexiones domésticas lo cierran para frenar spam:</p>
+<p>   falla por red, no por el contacto.</p>
+<p>2. <strong>Greylisting.</strong> El servidor responde <code>4xx</code> "intentá después" a un remitente desconocido. Un</p>
+<p>   verificador mal escrito lo lee como inválido y borra contactos buenos.</p>
+<p>3. <strong>Reputación.</strong> Sondeos masivos queman la IP que después envía.</p>
+<p>Aun resolviendo los tres, el catch-all sigue sin respuesta. Por eso el script es DNS puro: afirma lo que</p>
+<p>se puede afirmar sin tocar el servidor del otro.</p>
+<h2>La tasa de rebote real se lee, no se estima</h2>
+<p>El único dato real lo devuelve el envío, y conviene no mezclar duro con blando.</p>
+<pre><code>
+// rebotes.mjs — export del proveedor: email,status,reason
+import { readFile } from 'node:fs/promises';
+
+const csv = await readFile(process.argv[2] ?? 'envio.csv', 'utf8');
+const filas = csv.trim().split('\n').slice(1).map((l) =&gt; l.split(','));
+
+const duros = filas.filter((f) =&gt; /hard|permanent|5\.\d/i.test(f.slice(1).join(' ')));
+const blandos = filas.filter((f) =&gt; /soft|temporary|4\.\d/i.test(f.slice(1).join(' ')));
+const pct = (n) =&gt; ((n / filas.length) * 100).toFixed(2);
+
+console.log(`enviados ${filas.length} · duros ${duros.length} (${pct(duros.length)}%) · ` +
+  `blandos ${blandos.length} (${pct(blandos.length)}%)`);
+</code></pre>
+<p>Duro es "esta dirección no existe": se borra. Blando es buzón lleno, servidor caído o greylisting: se</p>
+<p>reintenta. Sumarlos hace que la lista parezca peor de lo que es —o mejor, si el proveedor solo muestra el</p>
+<p>total. Y un duro posterior a un DNS <code>RECIBE</code> es esperable: el dominio recibe correo, ese buzón no.</p>
+<h2>Lo que este script no cubre</h2>
+<ul>
+<li><strong>Que el buzón exista.</strong> Sin SMTP no se sabe; con SMTP el catch-all miente igual.</li>
+<li><strong>Que la persona siga en la empresa.</strong> Se resuelve con fecha de origen, no con DNS.</li>
+<li><strong>Trampas de spam.</strong> MX válido, veredicto <code>RECIBE</code>, cero interés: ninguna verificación técnica las ve.</li>
+<li><strong>Base legal.</strong> Un email corporativo es dato personal: bajo Ley 25.326, LGPD o GDPR importan base de</li>
+</ul>
+<p>  licitud, información al titular y baja. Esto no reemplaza una revisión legal.</p>
+<ul>
+<li><strong>Reputación del emisor.</strong> Tu SPF, DKIM y DMARC se miran en el proveedor de envío.</li>
+<li><strong>Listas nuevas de descartables.</strong> La del script es corta y envejece.</li>
+</ul>
+<h2>Qué hacer con la salida</h2>
+<p>Corré el script contra tu lista actual y mirá los cuatro números. Si <code>SIN_MX</code> y <code>DESECHABLE</code> son una</p>
+<p>porción grande, la fuente está mala y el filtro no lo arregla: hay que cambiar de dónde salen los</p>
+<p>contactos. Si casi todo da <code>RECIBE</code> y aun así rebota, el problema está después del DNS.</p>
+<p>Si el cuello de botella es de dónde salen los contactos, el</p>
+<p><a href="https://apify.com/joseabreuy/b2b-website-contact-whatsapp-enricher"><strong>B2B Website Contact, Email, WhatsApp &amp; Social Enricher</strong></a></p>
+<p>en Apify extrae y normaliza los datos públicos de contacto de un dominio; la verificación DNS de arriba</p>
+<p>la seguís haciendo vos sobre esa salida antes de enviar.</p>
+<p>Y si necesitás el pipeline completo —extraer contactos de fuentes públicas, normalizar y verificar—</p>
+<p>está en los packs <strong>B2B Leads Arsenal</strong>:</p>
+<ul>
+<li>Vol. 1: &lt;https://abreujo7.gumroad.com/l/zabreuit-pack-03&gt; — USD 79</li>
+<li>Vol. 2: &lt;https://abreujo7.gumroad.com/l/zabreuit-pack-04&gt; — USD 79</li>
+</ul>
+<p>Ninguno incluye emails privados de LinkedIn ni bases compradas, y ninguno promete tasas de respuesta:</p>
+<p>traen las herramientas para que tu lista no destruya el dominio en el primer envío.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-03">B2B Leads Arsenal — Vol. 1 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>

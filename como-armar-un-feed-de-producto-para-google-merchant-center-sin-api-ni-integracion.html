@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo armar un feed de producto para Google Merchant Center sin API ni integración</title>
+<meta name="description" content="Un feed para Google Shopping sin API sale del JSON-LD de cada ficha. La mitad se rechaza por campos que nadie revisó.">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-13</p><h1>Cómo armar un feed de producto para Google Merchant Center sin API ni integración</h1>
+<p>Un feed para Google Shopping sin API sale del JSON-LD de cada ficha. La mitad se rechaza por campos que nadie revisó.</p>
+<p>El caso típico: una tienda con 4.000 SKU quiere aparecer en Google Shopping. No hay acceso a la Admin API de la plataforma, o sí lo hay pero el cliente no paga la app de integración por rango de SKU. Alguien arma un CSV a mano desde el panel, lo sube a Merchant Center y a los tres días aparecen 900 productos "no aprobados" con motivos que suenan iguales: precio, disponibilidad, imagen.</p>
+<p>La salida no es un scraper de HTML. Es leer el mismo bloque que la tienda ya publica para Google: el <code>Product</code> en JSON-LD. Está en la ficha, es público, no requiere token y es contra lo que el rastreador de Merchant Center compara tu feed. Si el feed y el JSON-LD dicen cosas distintas, te rechazan el ítem.</p>
+<h2>Por qué se rechaza el feed aunque el CSV esté perfecto</h2>
+<p>De los motivos de desaprobación, cuatro dependen de la landing, no del archivo:</p>
+<ul>
+<li><strong>Precio distinto.</strong> El CSV dice 39.990 y la ficha muestra 35.990 porque hubo una promoción que no se replicó. Google rastrea la ficha, compara y desaprueba.</li>
+<li><strong>Disponibilidad distinta.</strong> El feed dice <code>in stock</code>, la ficha muestra "sin stock". Pasa siempre con catálogos grandes que se actualizan dos veces por semana.</li>
+<li><strong>Precio con formato local.</strong> <code>39.990</code> se lee como treinta y nueve con noventa y nueve. El feed espera <code>39990.00 ARS</code>: número, espacio, código ISO 4217.</li>
+<li><strong><code>gtin</code> inventado o vacío.</strong> Si el producto no tiene GTIN, hay que declarar <code>identifier_exists=no</code>. Poner un código cualquiera es peor que dejarlo vacío.</li>
+</ul>
+<p>Los otros dos motivos son del archivo: <code>image_link</code> que devuelve 403 o mide menos de 100x100 px, y <code>link</code> con parámetros de tracking o redirecciones que no coinciden con la URL final.</p>
+<h2>Paso 1 — Extraer el <code>Product</code> del JSON-LD</h2>
+<p>Node 18+ alcanza. El script lee la ficha, junta todos los bloques <code>application/ld+json</code>, aplana <code>@graph</code> y se queda con el nodo <code>Product</code>:</p>
+<pre><code>
+// ld-feed.mjs — uso: node ld-feed.mjs https://tienda.com/producto
+const AVAIL = {
+  'https://schema.org/InStock': 'in stock',
+  'https://schema.org/OutOfStock': 'out of stock',
+  'https://schema.org/PreOrder': 'preorder',
+  'https://schema.org/BackOrder': 'backorder',
+};
+
+async function jsonLdBlocks(url) {
+  const res = await fetch(url, { headers: { 'User-Agent': 'feed-audit/1.0 (+contacto@tudominio.com)' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status} en ${url}`);
+  const html = await res.text();
+  // El atributo type puede venir sin comillas (HTML válido) y ahí se rompen la mitad de los parsers.
+  const blocks = [...html.matchAll(/&lt;script[^&gt;]+type\s*=\s*["']?application\/ld\+json["']?[^&gt;]*&gt;([\s\S]*?)&lt;\/script&gt;/gi)];
+  return blocks.map((m) =&gt; m[1]);
+}
+
+function flatten(node, acc = []) {
+  if (Array.isArray(node)) { node.forEach((n) =&gt; flatten(n, acc)); return acc; }
+  if (!node || typeof node !== 'object') return acc;
+  acc.push(node);
+  if (node['@graph']) flatten(node['@graph'], acc);
+  return acc;
+}
+
+const typeOf = (n) =&gt; (Array.isArray(n['@type']) ? n['@type'] : n['@type'] ? [n['@type']] : []);
+
+const nodes = (await jsonLdBlocks('https://tienda.com/producto')).flatMap((raw) =&gt; {
+  try { return flatten(JSON.parse(raw)); } catch { return []; } // un bloque roto no debe tumbar el lote
+});
+
+const product = nodes.find((n) =&gt; typeOf(n).includes('Product'))
+  ?? nodes.find((n) =&gt; typeOf(n).includes('ProductGroup'));
+if (!product) throw new Error('La ficha no publica Product en JSON-LD');
+
+const offer = Array.isArray(product.offers)
+  ? product.offers[0]
+  : (product.offers ?? product.hasVariant?.[0]?.offers ?? {});
+const price = offer.price ?? offer.priceSpecification?.price;
+const currency = offer.priceCurrency ?? offer.priceSpecification?.priceCurrency;
+const brand = typeof product.brand === 'string' ? product.brand : product.brand?.name;
+const gtin = product.gtin13 ?? product.gtin12 ?? product.gtin ?? product.mpn;
+
+console.log({
+  id: product.sku ?? product.productID ?? '',
+  title: (product.name ?? '').slice(0, 150),
+  availability: AVAIL[offer.availability] ?? 'in stock',
+  price: price == null ? '' : `${Number(price).toFixed(2)} ${currency ?? ''}`.trim(),
+  brand, gtin, image: Array.isArray(product.image) ? product.image[0] : product.image,
+});
+</code></pre>
+<p>Tres detalles que aparecen en producción y no en los tutoriales:</p>
+<ul>
+<li><strong><code>offers</code> puede ser un array, un objeto o no existir.</strong> En tiendas con variantes el precio vive en <code>hasVariant[].offers[]</code>. Si asumís objeto, <code>offer.price</code> te da <code>undefined</code> y el feed sale con la columna de precio vacía sin lanzar ningún error.</li>
+<li><strong><code>price</code> viene como string.</strong> <code>"269999.00"</code> sin <code>Number()</code> se concatena en vez de sumar, y cualquier cálculo de margen o de variación queda mal sin avisar.</li>
+<li><strong>El bloque JSON-LD puede ser inválido.</strong> Una coma de más en un bloque no debe cortar el lote de 4.000 URLs: por eso el <code>try/catch</code> está por bloque y no por página.</li>
+</ul>
+<h2>Paso 2 — Mapear a las columnas del feed</h2>
+<p>Merchant Center acepta TSV, XML o API. El TSV es el más simple de generar y de auditar con un <code>diff</code>. Estas son las columnas que necesita un ítem de producto:</p>
+<ul>
+<li><code>id</code> — <code>sku</code> o <code>productID</code>. Estable entre corridas, si no se duplican ítems.</li>
+<li><code>title</code> — <code>name</code>. Máximo 150 caracteres; se trunca, no se rechaza.</li>
+<li><code>description</code> — <code>description</code>. Máximo 5.000 caracteres, sin HTML.</li>
+<li><code>link</code> — URL canónica de la ficha, sin parámetros de tracking ni redirecciones.</li>
+<li><code>image_link</code> — <code>image[0]</code>. Pública, sin login, mínimo 100x100 px.</li>
+<li><code>availability</code> — <code>offers.availability</code>. <code>in stock</code>, <code>out of stock</code>, <code>preorder</code> o <code>backorder</code>.</li>
+<li><code>price</code> — <code>offers.price</code> + <code>priceCurrency</code>. <code>39990.00 ARS</code>, con espacio y código ISO 4217.</li>
+<li><code>brand</code> — <code>brand.name</code>. Requerido en la mayoría de las categorías.</li>
+<li><code>gtin</code> — <code>gtin13</code> / <code>gtin12</code> / <code>gtin8</code>. Vacío obliga a <code>identifier_exists=no</code>.</li>
+<li><code>condition</code> — <code>offers.itemCondition</code>. <code>new</code> salvo que vendas usados.</li>
+</ul>
+<p>El <code>id</code> es la decisión que más se ignora. Si usás el título o el índice de la fila, cada corrida genera ítems nuevos y Merchant Center acumula duplicados hasta inutilizar el catálogo.</p>
+<h2>Paso 3 — Recorrer el catálogo y validar antes de subir</h2>
+<p>Con una URL funciona. Con 4.000 necesitás dos cosas: la lista de URLs y un chequeo previo. La lista sale del <code>sitemap.xml</code> de la tienda (o de <code>sitemap_products_1.xml</code> en Shopify); el chequeo es este:</p>
+<pre><code>
+const rows = []; // una fila por ficha, ya extraída
+const problemas = { sinGtin: 0, sinPrecio: 0, sinImagen: 0 };
+for (const r of rows) {
+  if (!r.gtin) problemas.sinGtin++;
+  if (!r.price) problemas.sinPrecio++;
+  if (!r.image) problemas.sinImagen++;
+}
+console.log(`${rows.length} filas`, problemas);
+</code></pre>
+<p>Si <code>sinPrecio</code> o <code>sinImagen</code> dan distinto de cero, no subas el feed: esos ítems se van a desaprobar y te van a tapar el diagnóstico de los demás.</p>
+<p>Corrélo sobre veinte fichas antes de escribir el pipeline y mirá la columna <code>gtin</code>. En la primera tienda donde probé este script —un retailer argentino— el JSON-LD traía nombre, imagen y precio, pero ningún GTIN. No es un bug del script: es el catálogo real, y es lo que el feed tiene que declarar con <code>identifier_exists=no</code>.</p>
+<h2>Lo que este método no resuelve</h2>
+<ul>
+<li><strong>Una fila por página, no por variante.</strong> Si la tienda vende el mismo buzo en cinco talles, este script devuelve una fila. Para variantes hace falta leer <code>hasVariant[]</code> y generar <code>item_group_id</code> más un <code>id</code> distinto por variante; cada plataforma lo publica con otra forma.</li>
+<li><strong>Fichas sin JSON-LD.</strong> Hay tiendas que solo emiten microdata o nada; ahí el feed sale de la API de la plataforma o del HTML, y el mantenimiento se multiplica.</li>
+<li><strong>Varios países o monedas.</strong> Un feed es por país y idioma de destino. Si la tienda sirve precios distintos según geografía, necesitás una corrida por mercado, no una tabla con todo mezclado.</li>
+<li><strong>Precios que cambian todo el día.</strong> El feed es una foto; si el precio cambia cada hora necesitás actualización programada, y eso ya es infraestructura.</li>
+<li><strong>Bloqueos del origen.</strong> Muchas tiendas grandes responden 403 o 429 desde servidores: el script corre en tu máquina y falla en un VPS sin proxy.</li>
+</ul>
+<p>Si el cliente tiene una tienda y actualiza el feed una vez por semana, el script sobra. Si tiene seis tiendas, cada una con otra plataforma, el trabajo real deja de ser el parseo y pasa a ser la paginación, los reintentos, el proxy y el diff entre corridas.</p>
+<p>Ese empaquetado ya existe: <strong>E-commerce Intelligence — Vol. 1</strong> incluye el extractor universal de Schema.org (el mismo enfoque de este artículo, pero resolviendo <code>@graph</code>, variantes y reintentos) más extractores para Shopify, VTEX, Tiendanube, WooCommerce, Magento, BigCommerce, PrestaShop y Wix: &lt;https://gumroad.com/l/zabreuit-pack-01&gt;.</p>
+<p>Antes de comprar, corré el script gratuito contra dos fichas de tu cliente y mirá cuántas filas salen sin GTIN. Si son pocas, con el script y un <code>cron</code> alcanza.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-01">E-commerce Intelligence — Vol. 1 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>
