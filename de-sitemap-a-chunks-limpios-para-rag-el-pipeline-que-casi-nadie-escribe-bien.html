@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>De sitemap a chunks limpios para RAG: el pipeline que casi nadie escribe bien</title>
+<meta name="description" content="La mitad de los RAG que fallan no fallan por el modelo: fallan porque los documentos entraron con menús, cookies y "acepto todo". Este pipeline saca Markdo">
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-01</p><h1>De sitemap a chunks limpios para RAG: el pipeline que casi nadie escribe bien</h1>
+<p>La mitad de los RAG que fallan no fallan por el modelo: fallan porque los documentos entraron con menús, cookies y "acepto todo". Este pipeline saca Markdown limpio desde el sitemap, con Node.js y cero dependencias.</p>
+<p>Un caso concreto: tenés 400 URLs de documentación en un <code>sitemap.xml</code> y querés que tu agente responda con eso. Lo primero que aparece en el tutorial es <code>Cheerio</code> + <code>LangChain</code> + un splitter de 1.000 caracteres. El índice queda armado en veinte minutos y las respuestas salen mal por una razón que no está en el código del agente: los chunks contienen el header de navegación, el banner de cookies, los links al pie y el aviso legal. El modelo recupera "Inicio · Productos · Contacto · Política de cookies" y lo usa como contexto.</p>
+<p>El orden correcto es al revés del que sugiere el tutorial: <strong>primero extraer texto de verdad, después cortar</strong>. Un chunk mal extraído no se arregla cambiando de modelo ni de base vectorial.</p>
+<h2>Paso 0: leer el sitemap como lo que es</h2>
+<p>Un <code>sitemap.xml</code> es un índice, no una lista de artículos. Puede tener <code>sitemapindex</code> anidado, <code>lastmod</code> y URLs de etiquetas, autores y paginación que no aportan conocimiento.</p>
+<pre><code>
+// sitemap.mjs — devuelve URLs de contenido, no de navegación
+const SKIP = /\/(tag|tags|category|author|page|search|cart|login|account)\b/i;
+
+async function fetchText(url) {
+  const res = await fetch(url, { headers: { "user-agent": "zabreuit-docs-crawler/1.0" } });
+  if (!res.ok) throw new Error(`${res.status} ${url}`);
+  return res.text();
+}
+
+export async function sitemapUrls(start, seen = new Set()) {
+  const xml = await fetchText(start);
+  const locs = [...xml.matchAll(/&lt;loc&gt;\s*([^&lt;\s]+)\s*&lt;\/loc&gt;/gi)].map((m) =&gt; m[1]);
+  const urls = [];
+  for (const loc of locs) {
+    if (seen.has(loc)) continue;
+    seen.add(loc);
+    if (/\.xml(\.gz)?$/i.test(loc)) {
+      urls.push(...(await sitemapUrls(loc, seen))); // sitemapindex
+    } else if (!SKIP.test(new URL(loc).pathname)) {
+      urls.push(loc);
+    }
+  }
+  return urls;
+}
+</code></pre>
+<p>Antes de crawlear, dos chequeos de cortesía que también son técnicos: <code>robots.txt</code> (qué rutas pide no visitar) y <code>llms.txt</code> (si el sitio ya publica su contexto para modelos, usalo y ahorrate el crawl).</p>
+<h2>Paso 1: aislar el contenido real</h2>
+<p>Toda página de documentación tiene tres zonas: navegación, contenido y pie. El contenido vive en <code>&lt;main&gt;</code>, <code>&lt;article&gt;</code> o en el <code>&lt;div&gt;</code> con más párrafos. Esa última heurística salva los sitios viejos sin HTML semántico.</p>
+<pre><code>
+// extract.mjs — texto del bloque con más prosa
+const DROP = /&lt;(script|style|nav|header|footer|aside|form|noscript|svg|iframe)[\s\S]*?&lt;\/\1&gt;/gi;
+
+const textLen = (html) =&gt;
+  html.replace(/&lt;[^&gt;]+&gt;/g, " ").replace(/\s+/g, " ").trim().length;
+
+export function mainContent(html) {
+  const clean = html.replace(/&lt;!--[\s\S]*?--&gt;/g, "").replace(DROP, " ");
+
+  const semantic = clean.match(/&lt;(main|article)\b[^&gt;]*&gt;([\s\S]*?)&lt;\/\1&gt;/i);
+  if (semantic &amp;&amp; textLen(semantic[2]) &gt; 400) return semantic[2];
+
+  // sin etiqueta semántica: el div con más texto suele ser el artículo
+  const blocks = [...clean.matchAll(/&lt;div\b[^&gt;]*&gt;([\s\S]*?)&lt;\/div&gt;/gi)];
+  let best = "", bestLen = 0;
+  for (const [, inner] of blocks) {
+    const paragraphs = (inner.match(/&lt;p\b/gi) ?? []).length;
+    const len = textLen(inner);
+    if (paragraphs &gt;= 3 &amp;&amp; len &gt; bestLen) { best = inner; bestLen = len; }
+  }
+  return best || clean;
+}
+</code></pre>
+<p>Si el texto extraído tiene menos de ~300 caracteres, la página es un shell de JavaScript o un 404 blando: se descarta. Un RAG con páginas vacías es peor que un RAG más chico.</p>
+<h2>Paso 2: HTML a Markdown, con la estructura que importa</h2>
+<p>Para recuperar contexto, el Markdown tiene que conservar títulos, listas y bloques de código. El resto (clases, <code>div</code>s, atributos) es ruido.</p>
+<pre><code>
+// to-markdown.mjs — subconjunto honesto: títulos, párrafos, listas, código, tablas
+export function toMarkdown(html) {
+  return html
+    .replace(/&lt;pre[^&gt;]*&gt;([\s\S]*?)&lt;\/pre&gt;/gi, (_, code) =&gt;
+      "\n```\n" + decode(code.replace(/&lt;[^&gt;]+&gt;/g, "")) + "\n```\n")
+    .replace(/&lt;h([1-6])[^&gt;]*&gt;([\s\S]*?)&lt;\/h\1&gt;/gi, (_, n, t) =&gt;
+      "\n" + "#".repeat(Number(n)) + " " + inline(t) + "\n")
+    .replace(/&lt;li[^&gt;]*&gt;([\s\S]*?)&lt;\/li&gt;/gi, (_, t) =&gt; "\n- " + inline(t))
+    .replace(/&lt;blockquote[^&gt;]*&gt;([\s\S]*?)&lt;\/blockquote&gt;/gi, (_, t) =&gt;
+      "\n&gt; " + inline(t) + "\n")
+    .replace(/&lt;p[^&gt;]*&gt;([\s\S]*?)&lt;\/p&gt;/gi, (_, t) =&gt; "\n\n" + inline(t) + "\n")
+    .replace(/&lt;br\s*\/?&gt;/gi, "\n")
+    .replace(/&lt;[^&gt;]+&gt;/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+const decode = (s) =&gt;
+  s.replace(/&amp;lt;/g, "&lt;").replace(/&amp;gt;/g, "&gt;").replace(/&amp;amp;/g, "&amp;")
+   .replace(/&amp;quot;/g, '"').replace(/&amp;#39;/g, "'");
+
+const inline = (s) =&gt;
+  decode(s.replace(/&lt;[^&gt;]+&gt;/g, " "))
+    .replace(/[ \t]+/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") // los links relativos no sirven fuera del sitio
+    .trim();
+</code></pre>
+<h2>Paso 3: cortar por secciones, no por caracteres</h2>
+<p>El splitter por longitud parte una tabla al medio y deja el encabezado en el chunk anterior. Cortar por títulos (<code>##</code>) mantiene cada sección completa y autocontenida; el título entra como prefijo del texto que se embebe, que es lo que hace recuperable al chunk.</p>
+<pre><code>
+// chunk.mjs
+export function chunkByHeading(md, { maxChars = 1800, minChars = 200 } = {}) {
+  const parts = md.split(/\n(?=#{2,3} )/);
+  const chunks = [];
+  for (const part of parts) {
+    const heading = part.match(/^#{2,3} (.+)$/m)?.[1] ?? "";
+    if (part.trim().length &lt;= maxChars) {
+      if (part.trim().length &gt;= minChars) chunks.push({ heading, text: part.trim() });
+      continue;
+    }
+    // sección larga: cortar en párrafos, arrastrando el título
+    let buf = "";
+    for (const para of part.split(/\n{2,}/)) {
+      if ((buf + para).length &gt; maxChars &amp;&amp; buf) {
+        chunks.push({ heading, text: buf.trim() });
+        buf = "";
+      }
+      buf += para + "\n\n";
+    }
+    if (buf.trim().length &gt;= minChars) chunks.push({ heading, text: buf.trim() });
+  }
+  return chunks;
+}
+</code></pre>
+<p>Dos detalles que cambian la calidad del índice: el <code>heading</code> va como campo aparte <strong>y</strong> se antepone al texto embebido (<code>${heading}\n\n${text}</code>); y los chunks de menos de 200 caracteres se descartan salvo que sean notas cortas con valor propio.</p>
+<h2>Paso 4: emitir JSONL y deduplicar</h2>
+<p>Un solo archivo, una línea por chunk, con <code>url</code>, <code>heading</code>, <code>text</code> y un hash de contenido. El hash detecta el mismo texto en <code>v1/</code> y <code>v2/</code> de la documentación y evita pagar dos veces por el mismo embedding.</p>
+<pre><code>
+// run.mjs — pipeline completo
+import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
+
+const sleep = (ms) =&gt; new Promise((r) =&gt; setTimeout(r, ms));
+const seen = new Set();
+const out = [];
+
+const urls = await sitemapUrls("https://docs.ejemplo.com/sitemap.xml");
+for (const url of urls) {
+  const html = await fetchText(url);
+  const chunks = chunkByHeading(toMarkdown(mainContent(html)));
+  for (const c of chunks) {
+    const key = createHash("sha1").update(c.text).digest("hex");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(JSON.stringify({ url, ...c, hash: key }));
+  }
+  await sleep(400); // cortesía: 2-3 req/s como máximo
+}
+
+writeFileSync("docs.jsonl", out.join("\n") + "\n");
+console.log(`${urls.length} URLs → ${out.length} chunks únicos`);
+</code></pre>
+<p>Con eso tenés <code>docs.jsonl</code> y podés embeber con el proveedor que quieras. El crawl de 400 páginas tarda unos minutos y no cuesta nada más que tu tiempo.</p>
+<h2>Donde este pipeline se rompe</h2>
+<p>Vale decirlo antes de que lo descubras en producción:</p>
+<ul>
+<li><strong>Documentación renderizada en el cliente.</strong> Si el contenido no está en el HTML inicial, <code>fetch</code> devuelve el shell. Ahí necesitás un navegador headless y el costo se multiplica por diez.</li>
+<li><strong>Sitios con <code>sitemap</code> incompleto o inexistente.</strong> Toca descubrir URLs por enlaces internos desde la home, con profundidad limitada, y aceptar que vas a dejar cosas afuera.</li>
+<li><strong>Contenido detrás de login o de un plan pago.</strong> No hay pipeline que lo resuelva; eso es un acuerdo comercial, no un problema técnico.</li>
+<li><strong>Documentación que cambia todos los días.</strong> El crawl puntual sirve una vez; mantenerlo es un cron, un diff por hash y un re-embedding incremental.</li>
+<li><strong>Textos de interfaz dentro de <code>&lt;main&gt;</code>.</strong> Un "Última actualización: … · Copiar como Markdown" no es navegación y la heurística no lo saca. Se limpia con una denylist de frases cortas y revisando a mano los primeros diez chunks; no hay magia que lo resuelva solo.</li>
+<li><strong>Sitios que prohíben el crawl en <code>robots.txt</code> o en sus términos.</strong> Se respeta. Hay alternativas legales (API oficial, feed, licencia de datos) y ninguna es "ignorar el archivo".</li>
+</ul>
+<p>Si lo que necesitás es hacer esto una vez para un proyecto propio, el código de arriba sobra y no necesitás comprar nada. Si tenés que repetirlo para varios sitios y mantenerlo, está empaquetado en <strong>AI &amp; RAG Content Pipeline</strong> (Gumroad, 10 herramientas: sitemap a Markdown, docs a chunks, <code>llms.txt</code>, papers de ArXiv, hilos de Discourse): &lt;https://gumroad.com/l/zabreuit-pack-07&gt;.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-07">AI &amp; RAG Content Pipeline — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>
