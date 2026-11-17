@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>De sitemap a chunks limpios para RAG: el pipeline que casi nadie escribe bien</title>
-<meta name="description" content="La mitad de los RAG que fallan no fallan por el modelo: fallan porque los documentos entraron con menús, cookies y "acepto todo". Este pipeline saca Markdo">
+<meta name="description" content="La mitad de los RAG que fallan no fallan por el modelo: fallan porque los documentos entraron con menús, cookies y &quot;acepto todo&quot;. Este pipeline saca Markdo">
+
 <style>
 :root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
 *{box-sizing:border-box}
@@ -34,7 +35,7 @@ footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size
 </head>
 <body>
 <header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
-<main><p class="meta">2026-11-01</p><h1>De sitemap a chunks limpios para RAG: el pipeline que casi nadie escribe bien</h1>
+<main><p class="meta">2026-11-17</p><h1>De sitemap a chunks limpios para RAG: el pipeline que casi nadie escribe bien</h1>
 <p>La mitad de los RAG que fallan no fallan por el modelo: fallan porque los documentos entraron con menús, cookies y "acepto todo". Este pipeline saca Markdown limpio desde el sitemap, con Node.js y cero dependencias.</p>
 <p>Un caso concreto: tenés 400 URLs de documentación en un <code>sitemap.xml</code> y querés que tu agente responda con eso. Lo primero que aparece en el tutorial es <code>Cheerio</code> + <code>LangChain</code> + un splitter de 1.000 caracteres. El índice queda armado en veinte minutos y las respuestas salen mal por una razón que no está en el código del agente: los chunks contienen el header de navegación, el banner de cookies, los links al pie y el aviso legal. El modelo recupera "Inicio · Productos · Contacto · Política de cookies" y lo usa como contexto.</p>
 <p>El orden correcto es al revés del que sugiere el tutorial: <strong>primero extraer texto de verdad, después cortar</strong>. Un chunk mal extraído no se arregla cambiando de modelo ni de base vectorial.</p>
