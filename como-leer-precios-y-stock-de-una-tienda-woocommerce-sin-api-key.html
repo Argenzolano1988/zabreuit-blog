@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo leer precios y stock de una tienda WooCommerce sin API key</title>
+<meta name="description" content="La Store API pública de WooCommerce devuelve catálogo, precio y stock en JSON sin credenciales. Ruta, unidades de precio y trampas medidas.">
+
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-18</p><h1>Cómo leer precios y stock de una tienda WooCommerce sin API key</h1>
+<p>La Store API pública de WooCommerce devuelve catálogo, precio y stock en JSON sin credenciales. Ruta, unidades de precio y trampas medidas.</p>
+<p>Hoy, 18 de noviembre de 2026, la GoPro Mission 1 Pro Grip Edition figura en gopro.com.ar a ARS 2.049.999, rebajada desde 2.099.999. El mismo catálogo público muestra 24 productos en oferta sobre 85 visibles. Todo eso salió de una URL que no pide token, cookie ni usuario: la Store API que WooCommerce usa para pintar su propio carrito.</p>
+<p>WooCommerce corre sobre WordPress y expone dos APIs distintas. La REST API clásica (<code>wc/v3</code>) exige consumer key y secret: sirve para crear pedidos, leer clientes y escribir stock. La Store API (<code>wc/store/v1</code>) es la que alimenta el storefront, así que es pública por diseño: catálogo, variantes, precios, disponibilidad y reseñas. Para monitorear precios alcanza con la segunda.</p>
+<h2>La ruta y cómo saber si está abierta</h2>
+<p>La ruta base es <code>/wp-json/wc/store/v1/products</code>. En gopro.com.ar responde así:</p>
+<pre><code>
+curl -s "https://gopro.com.ar/wp-json/wc/store/v1/products?per_page=2" | head -c 400
+</code></pre>
+<p>Si el sitio no usa enlaces permanentes bonitos, la misma ruta existe como parámetro:</p>
+<pre><code>
+curl -s "https://gopro.com.ar/?rest_route=/wc/store/v1/products&amp;per_page=1"
+</code></pre>
+<p>Comprobé las dos en la misma tienda y devuelven el mismo JSON. Antes de escribir el parser conviene descartar tres casos:</p>
+<ul>
+<li><strong>No es WordPress.</strong> La ruta devuelve 404 o el HTML de la home.</li>
+<li><strong>Es WordPress sin WooCommerce.</strong> El JSON trae <code>{"code":"rest_no_route"}</code>. El sitio responde, pero no hay catálogo.</li>
+<li><strong>WooCommerce con REST cerrado.</strong> Algún plugin de seguridad cierra <code>/wp-json/</code> a los no logueados. En porta.com.ar, que sí es WordPress, <code>/wp-json/</code> devuelve directamente HTML. No hay forma de leer el catálogo sin credenciales y ahí conviene parsear la ficha.</li>
+</ul>
+<p>Un detalle que ahorra tiempo: <code>GET /wp-json/</code> lista los namespaces activos. Si aparece <code>wc/store/v1</code>, la tienda tiene la API abierta.</p>
+<h2>El precio no viene en pesos: viene en unidades mínimas</h2>
+<p>Este es el error que rompe todos los monitores nuevos. El campo <code>prices.price</code> es un string entero en la unidad mínima de la moneda, y <code>prices.currency_minor_unit</code> dice cuántos decimales mover.</p>
+<p>En gopro.com.ar, un producto de ARS 44.999 se ve así:</p>
+<pre><code>
+"prices": {
+  "price": "44999",
+  "regular_price": "44999",
+  "sale_price": "44999",
+  "currency_code": "ARS",
+  "currency_minor_unit": 0
+}
+</code></pre>
+<p>En woocommerce.com, que vende en dólares, el mismo campo trae <code>"price": "19900"</code> con <code>currency_minor_unit: 2</code>. Son USD 199,00, no 19.900. El peso argentino y el chileno usan cero decimales; el dólar y el euro, dos. Si dividís siempre por 100, en Argentina te quedan precios 100 veces más chicos y el monitor avisa cualquier cosa.</p>
+<p>La fórmula que usé en el script es una sola:</p>
+<pre><code>
+const valor = Number(p.prices.price) / 10 ** Number(p.prices.currency_minor_unit);
+</code></pre>
+<p><code>on_sale</code> y <code>regular_price</code> permiten calcular el descuento sin adivinar: si <code>on_sale</code> es <code>true</code>, <code>price</code> ya viene rebajado y <code>regular_price</code> es el precio de lista.</p>
+<h2>Las variantes no traen su precio</h2>
+<p>El producto padre de tipo <code>variable</code> devuelve un array <code>variations[]</code> con <code>id</code> y <code>attributes</code>, nada más. El precio y el stock de cada talle o color están en su propio endpoint:</p>
+<pre><code>
+curl -s "https://gopro.com.ar/wp-json/wc/store/v1/products/68907"
+</code></pre>
+<p>Esa respuesta tiene <code>type: "variation"</code>, <code>parent: 55852</code> y su bloque <code>prices</code> completo. En la máscara de snorkel que medí, las cuatro variantes (azul y verde, en dos talles) salían ARS 44.999 cada una y el padre mostraba el mismo número, con <code>price_range</code> en <code>null</code>. En zulki.com.ar el mismo campo sí viene completo: el Bloque de Hielo tiene precio padre 28.500 y <code>price_range</code> de 28.500 a 38.000, porque la variante grande sale 38.000 y la mediana 28.500. O sea: <code>price_range</code> sirve cuando está, pero no se puede asumir que esté.</p>
+<p>El stock también es por variante. La Botella Térmica 0.530 de esa tienda trae <code>is_in_stock: false</code> en el padre y en las cinco variantes, con <code>stock_availability.text</code> en "Agotado". Si el script solo mira el padre, acierta; cuando el padre está en stock y una variante no, no.</p>
+<p>Consecuencia práctica: si el precio cambia por variante, el script necesita una request extra por variante. En un catálogo de 500 productos variables eso son cientos de llamadas, y ahí el <code>per_page=100</code> deja de ser el número que importa.</p>
+<p>El <code>sku</code> del padre puede venir vacío y el de la variante no: en gopro.com.ar el producto padre tenía <code>sku: ""</code> y la variación <code>OUT515L/XLB</code>. Para cruzar con un ERP, el SKU de la variante es el identificador útil.</p>
+<h2>Paginación: 100 por página y dos headers</h2>
+<p>El máximo es 100. Pedir <code>per_page=101</code> devuelve 400 con el mensaje exacto: <code>per_page debe estar entre 1 (incluido) y 100 (incluido)</code>. No hay que adivinarlo ni reintentar.</p>
+<p>El total está en los headers de la respuesta:</p>
+<pre><code>
+curl -sI "https://woocommerce.com/wp-json/wc/store/v1/products?per_page=100" | grep -i x-wp-total
+# x-wp-total: 1807
+# x-wp-totalpages: 19
+</code></pre>
+<p>Ese es el catálogo real de woocommerce.com: 1.807 productos en 19 páginas. gopro.com.ar tiene 85 y zulki.com.ar 31, así que entran en una sola llamada. Para recorrer todo:</p>
+<pre><code>
+let page = 1, totalPages = 1;
+do {
+  const res = await fetch(`${base}/wp-json/wc/store/v1/products?per_page=100&amp;page=${page}`);
+  totalPages = Number(res.headers.get("x-wp-totalpages") || 1);
+  const productos = await res.json();
+  // procesar productos
+  page++;
+} while (page &lt;= totalPages);
+</code></pre>
+<p>Los filtros que funcionan sin credenciales y que probé: <code>search=</code>, <code>category=&lt;id&gt;</code>, <code>orderby=price&amp;order=asc</code> y <code>page=</code>. El orden por precio sirve para vigilar el extremo barato del catálogo sin bajar los 1.800 productos enteros.</p>
+<h2>El script completo</h2>
+<p>Node 18 o superior, sin dependencias. Guarda CSV por stdout y deja el progreso por stderr:</p>
+<pre><code>
+// woo-precios.mjs — node woo-precios.mjs https://tienda.com &gt; catalogo.csv
+const base = (process.argv[2] || "").replace(/\/$/, "");
+if (!base) throw new Error("uso: node woo-precios.mjs https://tienda.com");
+
+async function get(url, intentos = 3) {
+  for (let i = 1; i &lt;= intentos; i++) {
+    const res = await fetch(url, { headers: { accept: "application/json" } });
+    if (res.ok) return res;
+    if (res.status === 429 || res.status &gt;= 500) {
+      await new Promise((r) =&gt; setTimeout(r, 1000 * i));
+      continue;
+    }
+    throw new Error(`${res.status} ${url}`);
+  }
+  throw new Error(`sin respuesta tras ${intentos} intentos: ${url}`);
+}
+
+const filas = [];
+let page = 1, totalPages = 1;
+do {
+  const res = await get(`${base}/wp-json/wc/store/v1/products?per_page=100&amp;page=${page}`);
+  totalPages = Number(res.headers.get("x-wp-totalpages") || 1);
+  const productos = await res.json();
+
+  for (const p of productos) {
+    const { price, regular_price, currency_code, currency_minor_unit } = p.prices;
+    const unidad = 10 ** Number(currency_minor_unit);
+    filas.push({
+      sku: p.sku || "",
+      nombre: p.name,
+      tipo: p.type,
+      precio: Number(price) / unidad,
+      lista: Number(regular_price) / unidad,
+      moneda: currency_code,
+      en_stock: p.is_in_stock ? "si" : "no",
+      variantes: p.variations?.length || 0,
+      url: p.permalink,
+    });
+  }
+  console.error(`página ${page}/${totalPages}: ${productos.length} productos`);
+  page++;
+  await new Promise((r) =&gt; setTimeout(r, 300));
+} while (page &lt;= totalPages);
+
+const cols = Object.keys(filas[0]);
+const csv = [cols.join(","), ...filas.map((f) =&gt; cols.map((c) =&gt; JSON.stringify(String(f[c]))).join(","))].join("\n");
+console.log(csv);
+</code></pre>
+<p>El <code>sleep</code> de 300 ms no es decorativo. Después de tres o cuatro consultas seguidas en un par de minutos, zulki.com.ar me devolvió 403; el mismo endpoint había contestado 200 antes. No sé si fue el WAF del hosting o un plugin de seguridad, pero el patrón se repite en tiendas chicas con hosting compartido: ráfaga corta, bloqueo, y hay que esperar.</p>
+<h2>Qué no vas a encontrar ahí</h2>
+<ul>
+<li><strong>Productos ocultos del catálogo.</strong> La API devuelve lo que el storefront muestra. Si la tienda oculta un ítem o lo marca como privado, no aparece.</li>
+<li><strong>Precios por cliente.</strong> Las listas mayoristas o los descuentos por rol viven en la REST API autenticada. La Store API siempre devuelve el precio público.</li>
+<li><strong>Costo y margen.</strong> No están en ningún endpoint público, por diseño.</li>
+<li><strong>Historial.</strong> Cada llamada es una foto. Para ver evolución hay que guardar las corridas y comparar; la API no recuerda nada.</li>
+</ul>
+<p>Con eso ya se puede montar un monitor semanal de 100 tiendas: 100 requests de catálogo, un archivo por fecha y un diff contra la semana anterior. Lo que no se puede improvisar es la parte aburrida: reintentos, rotación de proxies cuando el hosting bloquea, y normalizar el mismo producto entre tiendas distintas, que suele resolverse por EAN y no por SKU.</p>
+<h2>Cuándo esto deja de alcanzar</h2>
+<p>Si es una tienda tuya y una corrida por semana, el script de arriba sobra. Si son 40 tiendas todos los días, el mantenimiento pasa a ser tu trabajo no pago: un hosting con WAF distinto, una tienda que devuelve 403, otra que migró y cambió la ruta.</p>
+<p>Para ese caso existe el actor <a href="https://apify.com/joseabreuy/woocommerce-store-api-extractor"><strong>WooCommerce Store API &amp; Product Catalog Scraper</strong></a> en Apify. Hace lo mismo que el script (recorre <code>wc/store/v1</code>, variantes, precio, stock, SKU e imágenes), pero resuelve paginación, reintentos y proxy, y cobra por evento: USD 1,50 por 1.000 ítems. Se corre desde la consola, por API o como tool de MCP dentro de un agente.</p>
+<p>El pipeline completo —WooCommerce, Shopify, Tiendanube, VTEX, Mercado Libre— está empaquetado en <strong>E-commerce Intelligence Vol. 1</strong> (Gumroad, USD 79, diez extractores): <a href="https://gumroad.com/l/zabreuit-pack-01">zabreuit-pack-01</a>.</p>
+<p>Un consejo antes de comprar: corré el script gratuito contra dos tiendas propias. Si el resultado te sirve, no necesitás nada más. Si a las dos semanas estás escribiendo reintentos y manejando 403, ahí el actor te ahorra plata.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-01">E-commerce Intelligence — Vol. 1 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>
