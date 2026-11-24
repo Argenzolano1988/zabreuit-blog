@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Por qué Google no muestra el precio de tus productos: auditar el JSON-LD en lote</title>
+<meta name="description" content="El precio desaparece de Google cuando el JSON-LD del producto está roto o no existe. Se detecta en lote con 90 líneas de Node, sin herramientas de pago.">
+
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-20</p><h1>Por qué Google no muestra el precio de tus productos: auditar el JSON-LD en lote</h1>
+<p>El precio desaparece de Google cuando el JSON-LD del producto está roto o no existe. Se detecta en lote con 90 líneas de Node, sin herramientas de pago.</p>
+<p>Un catálogo de 800 SKU, un tema nuevo, un plugin de reseñas. A la semana siguiente, el precio ya no aparece en los resultados de búsqueda y en Search Console no hay un error que diga "este producto perdió el precio". Hay una lista de URLs con problemas, un informe que llega con días de atraso y la sensación de estar buscando a ciegas.</p>
+<p>El problema se puede reducir a una pregunta concreta: <strong>¿qué devuelve el HTML de cada página de producto cuando lo pedís con curl?</strong> Todo lo demás —Rich Results Test, Search Console, la extensión de SEO— es una forma más lenta de responder lo mismo.</p>
+<h2>Por qué el test manual no alcanza</h2>
+<p>El <a href="https://search.google.com/test/rich-results">Rich Results Test</a> valida una URL por vez y no tiene API pública. Con 800 productos, revisar el catálogo a mano es media jornada de trabajo, y esa media jornada vence en cuanto alguien toca el tema.</p>
+<p>Search Console sí es masivo, pero llega tarde y solo para páginas indexadas. El informe de <em>Datos estructurados no analizables</em> agrupa por tipo de error, no por plantilla: te dice que hay 400 páginas con JSON inválido, no que las 400 salen del mismo componente del tema. Sin esa distinción, el arreglo es adivinanza.</p>
+<p>Un script propio responde en minutos y con el HTML real que ve un cliente que abre la página con JavaScript desactivado, que es lo que Google recomienda para marcado de producto: <em>"If you're a merchant optimizing for all types of shopping results, we recommend putting <code>Product</code> structured data in the initial HTML for best results"</em>.</p>
+<h2>Las seis causas que aparecen en una corrida real</h2>
+<p>Los seis aparecen en catálogos grandes. En la corrida de seis URLs que muestro más abajo salieron tres de ellos, y los otros tres son los que encontrás en cuanto el lote pasa de cien páginas: no son teóricos, son los que el test manual nunca llega a ver.</p>
+<p><strong>1. Precio con formato local.</strong> <code>"price": "1.234,56"</code> es como se escribe un precio en Argentina y es exactamente lo que Google no puede leer. <code>price</code> es un número: separador decimal punto, sin separador de miles, sin símbolo de moneda. El error no salta a la vista porque el string es válido; el problema es semántico.</p>
+<p><strong>2. <code>priceCurrency</code> faltante.</strong> Para <em>product snippets</em> Google lo recomienda; para <em>merchant listings</em> (las fichas de compra) lo exige. Sin moneda, un precio de 19.99 puede ser dólares, euros o reales, y Google no adivina. Tres letras ISO 4217: <code>ARS</code>, <code>MXN</code>, <code>CLP</code>, <code>USD</code>.</p>
+<p><strong>3. <code>offers</code> sin <code>price</code>.</strong> Pasa con productos de precio variable: el tema emite un <code>Offer</code> vacío porque el precio se calcula en el cliente. La forma correcta para un rango es <code>AggregateOffer</code> con <code>lowPrice</code> y <code>priceCurrency</code>; <code>price</code> solo existe en <code>Offer</code>.</p>
+<p><strong>4. JSON que no parsea.</strong> Una coma final, una comilla sin escapar, un <code>"price": 19,99</code> escrito a mano en el template. Search Console lo reporta como no analizable, pero el bloque se ve perfectamente en el código fuente hasta que lo pasás por <code>JSON.parse</code>.</p>
+<p><strong>5. <code>ProductGroup</code> sin <code>Product</code>.</strong> Los temas nuevos de Shopify agrupan variantes en un <code>ProductGroup</code> con <code>hasVariant</code>. Google documenta ese formato, pero pide además el marcado de <code>Product</code> con los datos de la variante (<a href="https://developers.google.com/search/docs/appearance/structured-data/product-variants">product variants</a>). Si tu validador busca solo <code>Product</code> en el nivel superior y no entra en <code>hasVariant</code>, reporta la página como vacía. Falso negativo, y de los caros: te hace reescribir un marcado que ya estaba bien.</p>
+<p><strong>6. Dos precios distintos en la misma página.</strong> Tema y plugin emiten cada uno su <code>Product</code>, uno con el precio de lista y otro con el precio de oferta. Google toma uno y no avisa cuál. En la auditoría aparece como dos nodos con precios que no coinciden.</p>
+<p>Un detalle al revés: <code>availability</code> acepta la URL completa (<code>https://schema.org/InStock</code>) <strong>y</strong> el nombre corto (<code>InStock</code>). Un validador casero que solo acepte la URL marca un error que no existe. Menos falsos positivos es más importante que más reglas.</p>
+<h2>El script</h2>
+<p>Node 18 o superior, cero dependencias, sin headless browser. Pide el HTML crudo, extrae cada bloque <code>application/ld+json</code>, lo aplana (<code>@graph</code> y <code>hasVariant</code>) y aplica las reglas de arriba.</p>
+<pre><code>
+#!/usr/bin/env node
+// jsonld-audit.mjs — audita el marcado Product (JSON-LD) de una lista de URLs.
+// Uso: node jsonld-audit.mjs urls.txt &gt; reporte.csv
+import { readFileSync } from 'node:fs';
+
+const UA = 'Mozilla/5.0 (compatible; jsonld-audit/1.0)';
+const BLOCK = /&lt;script[^&gt;]+type=["']application\/ld\+json["'][^&gt;]*&gt;([\s\S]*?)&lt;\/script&gt;/gi;
+const PRICE = /^\d+(\.\d{1,2})?$/;
+const SO = /^https?:\/\/schema\.org\/[A-Za-z]+$/;
+
+const urls = readFileSync(process.argv[2], 'utf8')
+  .split('\n').map((l) =&gt; l.trim()).filter((l) =&gt; l &amp;&amp; !l.startsWith('#'));
+
+function flatten(node, out = []) {
+  if (Array.isArray(node)) return node.reduce((acc, n) =&gt; flatten(n, acc), out);
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node['@graph'])) flatten(node['@graph'], out);
+  if (Array.isArray(node.hasVariant)) flatten(node.hasVariant, out);
+  out.push(node);
+  return out;
+}
+
+const typesOf = (n) =&gt;
+  [].concat(n['@type'] ?? []).map((t) =&gt; String(t).replace(/^https?:\/\/schema\.org\//i, ''));
+
+function issuesOf(p) {
+  const bad = [];
+  if (!p.name) bad.push('sin name');
+  const offers = [].concat(p.offers ?? []);
+  if (!offers.length) bad.push('sin offers');
+  for (const o of offers) {
+    const raw = o.price ?? o.lowPrice ?? o.priceSpecification?.price;
+    const cur = o.priceCurrency ?? o.priceSpecification?.priceCurrency;
+    const avail = o.availability;
+    if (raw == null) bad.push('offer sin price');
+    else if (!PRICE.test(String(raw).replace(/^"(.*)"$/, '$1'))) bad.push(`price inválido: ${raw}`);
+    if (!/^[A-Z]{3}$/.test(String(cur ?? ''))) bad.push(`priceCurrency: ${cur ?? 'falta'}`);
+    if (avail &amp;&amp; !SO.test(String(avail)) &amp;&amp; !/^[A-Z][A-Za-z]+$/.test(String(avail)))
+      bad.push(`availability inválida: ${avail}`);
+  }
+  return bad;
+}
+
+async function audit(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() =&gt; ctrl.abort(), 15000);
+  try {
+    const res = await fetch(url, { headers: { 'user-agent': UA }, signal: ctrl.signal, redirect: 'follow' });
+    const html = await res.text();
+    const blocks = [...html.matchAll(BLOCK)].map((m) =&gt; m[1]);
+    const nodes = [];
+    const parseErrors = [];
+    for (const raw of blocks) {
+      try {
+        flatten(JSON.parse(raw.replace(/^\uFEFF/, '').trim()), nodes);
+      } catch {
+        parseErrors.push(raw.trim().slice(0, 60).replace(/\s+/g, ' '));
+      }
+    }
+    const products = nodes.filter((n) =&gt; typesOf(n).includes('Product'));
+    const groups = nodes.filter((n) =&gt; typesOf(n).includes('ProductGroup'));
+    const prices = products
+      .flatMap((p) =&gt; [].concat(p.offers ?? []))
+      .map((o) =&gt; o.price ?? o.lowPrice ?? o.priceSpecification?.price)
+      .filter((v) =&gt; v != null)
+      .map(String);
+    const bad = [
+      ...products.flatMap(issuesOf),
+      ...groups.filter((g) =&gt; !g.name).map(() =&gt; 'ProductGroup sin name'),
+      ...(new Set(prices).size &gt; 1 ? [`precios en conflicto: ${[...new Set(prices)].join(' / ')}`] : []),
+    ];
+    const microdata = /itemtype=["'][^"']*schema\.org\/Product/i.test(html);
+    return {
+      url, status: res.status, products: products.length, groups: groups.length,
+      blocks: blocks.length, parseErrors, microdata, issues: [...new Set(bad)],
+    };
+  } catch (e) {
+    return { url, status: 0, products: 0, groups: 0, blocks: 0, parseErrors: [], microdata: false, issues: [`fetch: ${e.name}`] };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+const rows = [];
+for (let i = 0; i &lt; urls.length; i += 4) {
+  rows.push(...(await Promise.all(urls.slice(i, i + 4).map(audit))));
+}
+
+const q = (s) =&gt; `"${String(s).replace(/"/g, '""')}"`;
+console.log('url,status,productos,grupos,bloques,errores_json,problemas');
+for (const r of rows) {
+  const flags = [
+    ...r.issues,
+    ...(r.parseErrors.length ? [`json roto: ${r.parseErrors[0]}`] : []),
+    ...(r.products + r.groups === 0 &amp;&amp; r.microdata ? ['solo microdata'] : []),
+    ...(r.products + r.groups === 0 &amp;&amp; !r.microdata ? ['sin marcado Product'] : []),
+  ];
+  console.log([q(r.url), r.status, r.products, r.groups, r.blocks, r.parseErrors.length, q(flags.join('; '))].join(','));
+}
+</code></pre>
+<p>Cuatro decisiones que importan cuando el catálogo es grande:</p>
+<ul>
+<li><strong>HTML crudo, no DOM.</strong> No necesitás Playwright: el marcado que Google lee está en el HTML inicial. Si no está ahí, el problema es real y no un artefacto de la herramienta.</li>
+<li><strong>Concurrencia 4.</strong> Suficiente para 800 URLs en pocos minutos, bajo el umbral donde la mayoría de los WAF empiezan a cortar.</li>
+<li><strong>El status va en el CSV.</strong> Un <code>429</code> no significa "sin marcado". Significa que el servidor no te dejó leer y que ese resultado no sirve como evidencia.</li>
+<li><strong>Un archivo, una foto.</strong> Guardá <code>reporte-2026-11-20.csv</code>. La auditoría vale por el diff contra el de la semana anterior: cuando alguien actualiza el tema, las páginas que cambian de estado aparecen solas.</li>
+</ul>
+<h2>Cómo leer la salida</h2>
+<p>La corrida real sobre seis URLs devolvió tres cosas distintas, y las tres importan:</p>
+<ul>
+<li><strong>Tres páginas con <code>200</code> y cero bloques JSON-LD.</strong> No hay marcado. Ningún plugin lo emite, o lo emite por JavaScript después del render. Es el caso más grave y el más fácil de arreglar.</li>
+<li><strong>Una página con <code>Product</code> y <code>offers</code> sin <code>price</code> ni <code>priceCurrency</code>.</strong> Precio variable mal modelado: le falta <code>AggregateOffer</code>.</li>
+<li><strong>Dos <code>429</code>.</strong> La misma URL, pedida de nuevo sin concurrencia, devolvió <code>200</code> y un <code>ProductGroup</code> con las variantes completas. Si el script no imprimiera el status, habría reportado dos páginas sanas como rotas y el arreglo habría ido al lugar equivocado.</li>
+</ul>
+<p>Ese último punto es la razón por la que conviene correr el script contra producción de noche, con concurrencia 1 o 2, y volver a pasar las URLs que devolvieron error antes de abrir un ticket.</p>
+<h2>De seis URLs a cinco mil</h2>
+<p>El insumo es el <code>sitemap.xml</code> que ya tenés. Bajalo, filtrá las URLs de producto (el patrón <code>/producto/</code>, <code>/p/</code>, <code>/products/</code> suele alcanzar), deduplicá y cortá en lotes de 500. El CSV de cada lote se concatena y el diff semanal te da tres listas: páginas que perdieron el marcado, páginas que ganaron errores nuevos, páginas que se arreglaron.</p>
+<p>Un cron semanal alcanza. Diario es ruido: Google no reindexa a esa velocidad y los cambios de tema se despliegan por sprint, no por día.</p>
+<h2>Cuando una sola página no cuadra</h2>
+<p>El lote te dice <em>cuáles</em> páginas están mal. Para entender <em>por qué</em> una página específica emite lo que emite, el CSV no sirve: necesitás ver el bloque completo, el estado SSR y los tipos inferidos. Para eso está la extensión <a href="https://open-vsx.org/extension/zabreuit/zabreuit-inspector">Zabreuit Web State &amp; Schema Inspector</a> para VS Code y Cursor: abre una URL, lista los bloques JSON-LD y el estado embebido, y genera las interfaces TypeScript o el esquema Zod del objeto, que es lo que necesitás para tipar el fix sin adivinar la forma del dato.</p>
+<h2>Si preferís no mantenerlo</h2>
+<p>El script son 90 líneas, pero mantenerlo implica seguirle el ritmo a los cambios de schema.org y a los temas que migran de <code>Product</code> a <code>ProductGroup</code>. Si el catálogo es grande y el equipo es chico, la alternativa honesta es una herramienta que ya hace el barrido:</p>
+<ul>
+<li><a href="https://gumroad.com/l/zabreuit-pack-09">SEO &amp; Web Health Auditors</a> (USD 79): incluye el validador masivo de Schema.org y rich snippets, más auditores de enlaces rotos, cabeceras, hreflang y sitemap. Diez scripts, mismo enfoque que este artículo: HTTP crudo, sin browser.</li>
+<li><a href="https://gumroad.com/l/zabreuit-pack-01">E-commerce Intelligence</a> (USD 79): el otro lado del problema, sacar catálogo y precios de Shopify, VTEX, WooCommerce, Magento, Tiendanube y Mercado Libre desde sus endpoints públicos.</li>
+</ul>
+<p>Ninguno de los dos reemplaza la decisión de qué arreglar. Eso sigue siendo tuyo.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-09">SEO &amp; Web Health Auditors — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>

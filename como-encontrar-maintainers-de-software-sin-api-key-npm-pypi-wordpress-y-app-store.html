@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo encontrar maintainers de software sin API key (npm, PyPI, WordPress y App Store)</title>
+<meta name="description" content="Los maintainers de paquetes y extensiones son una lista de contactos B2B que nadie compra: son públicos, están segmentados por tecnología y se actualizan s">
+
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-21</p><h1>Cómo encontrar maintainers de software sin API key (npm, PyPI, WordPress y App Store)</h1>
+<p>Los maintainers de paquetes y extensiones son una lista de contactos B2B que nadie compra: son públicos, están segmentados por tecnología y se actualizan solos. El problema no es el acceso, es que cada registro tiene forma distinta y la mitad de los campos de contacto vienen vacíos.</p>
+<p>Si vendés infraestructura, herramientas de desarrollo, auditorías o servicios de scraping, apuntar a quien mantiene un paquete con 50.000 descargas mensuales es mejor que comprar 10.000 emails genéricos. Esta guía cubre las cuatro fuentes que devuelven datos de contacto por HTTP simple, sin credenciales: el registry de npm, la API JSON de PyPI, el directorio de plugins de WordPress.org y la API de búsqueda de la App Store.</p>
+<h2>Qué se consigue y qué no</h2>
+<p>Sin credenciales, de forma estable:</p>
+<ul>
+<li><strong>npm</strong>: nombre del paquete, versión, repositorio, fecha del último release y la lista de maintainers con email cuando el proyecto lo declaró.</li>
+<li><strong>PyPI</strong>: autor, email de autor, URLs del proyecto y todas las versiones publicadas.</li>
+<li><strong>WordPress.org</strong>: autor del plugin, perfil público, instalaciones activas y valoraciones.</li>
+<li><strong>App Store</strong>: nombre del vendedor, su web y el identificador de artista de Apple.</li>
+</ul>
+<p>Lo que no se consigue: emails personales que el autor no publicó, teléfonos, datos de facturación, ni nada detrás de un login. Tampoco hay endpoint de "lista de todos los maintainers de un ecosistema": hay que barrer por búsqueda, y cada ecosistema limita cuánto te deja barrer por minuto.</p>
+<h2>Paso 1 — npm: del paquete al maintainer</h2>
+<p>El registry devuelve el packumento completo del paquete en <code>registry.npmjs.org/&lt;nombre&gt;</code>. Ahí está <code>maintainers</code>, que es un array de <code>{name, email}</code>. Lo importante: <code>name</code> y <code>username</code> son campos distintos según la antigüedad del paquete, y el email puede no estar.</p>
+<pre><code>
+// npm-maintainers.mjs — uso: node npm-maintainers.mjs cheerio react
+const pkgs = process.argv.slice(2);
+
+async function packument(name) {
+  const res = await fetch('https://registry.npmjs.org/' + encodeURIComponent(name).replace('%40', '@'), {
+    headers: { Accept: 'application/vnd.npm.install-v1+json, application/json' },
+  });
+  if (res.status === 404) return null; // paquete inexistente o unpublished
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' en ' + name);
+  return res.json();
+}
+
+for (const name of pkgs) {
+  const doc = await packument(name);
+  if (!doc) { console.log(name, 'no existe'); continue; }
+  const latest = doc['dist-tags']?.latest;
+  const maintainers = (doc.maintainers || []).map((m) =&gt; ({
+    handle: m.name || m.username,
+    email: m.email || null,
+  }));
+  console.log(name, latest, JSON.stringify(maintainers));
+}
+</code></pre>
+<p>Dos trampas que cuestan un falso positivo cada cien leads:</p>
+<ul>
+<li><code>Accept: application/vnd.npm.install-v1+json</code> devuelve el documento abreviado, que <strong>no</strong> incluye <code>maintainers</code>. Si pedís esa variante, <code>maintainers</code> viene vacío y parece que el paquete no tiene dueño.</li>
+<li>El usuario que publica el último release (<code>_npmUser</code>) no es necesariamente el maintainer. Un bot puede haberlo publicado: en un barrido real aparecen publishers llamados <code>GitHub Actions</code>. Filtrá handles de bots antes de escribirles.</li>
+</ul>
+<p>Para descubrir paquetes en lugar de partir de una lista conocida, está la búsqueda: <code>https://registry.npmjs.org/-/v1/search?text=keywords:scraper&amp;size=250</code>. Devuelve <code>objects[].package</code> con <code>name</code>, <code>publisher.username</code>, <code>date</code> y <code>links</code>. El filtro <code>text=keywords:...</code> es el que sirve: buscar por texto libre trae paquetes abandonados con el término en el README.</p>
+<h2>Paso 2 — PyPI: el email viene dentro del string</h2>
+<p>PyPI expone <code>https://pypi.org/pypi/&lt;proyecto&gt;/json</code>. El campo <code>info.author</code> suele venir en <code>null</code> y el contacto real está en <code>info.author_email</code>, con formato <code>Nombre &lt;email&gt;</code>. Hay que parsearlo, no concatenarlo.</p>
+<pre><code>
+// pypi-owner.mjs — uso: node pypi-owner.mjs requests django
+async function pypi(project) {
+  const res = await fetch('https://pypi.org/pypi/' + project + '/json');
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' en ' + project);
+  return res.json();
+}
+
+const parseEmail = (s) =&gt; s?.match(/&lt;([^&gt;]+)&gt;/)?.[1] ?? (s?.includes('@') ? s.trim() : null);
+
+for (const project of process.argv.slice(2)) {
+  const doc = await pypi(project);
+  if (!doc) { console.log(project, 'no existe'); continue; }
+  const { info, releases } = doc;
+  const versions = Object.keys(releases || {});
+  console.log({
+    project,
+    version: info.version,
+    author: info.author || info.maintainer || null,
+    email: parseEmail(info.author_email || info.maintainer_email),
+    homepage: info.project_urls?.Homepage || info.home_page || null,
+    versions: versions.length,
+  });
+}
+</code></pre>
+<p>Advertencia de calidad de datos: en proyectos grandes <code>author</code> suele ser <code>null</code> y <code>author_email</code> trae una dirección institucional (<code>Django Software Foundation &lt;foundation@djangoproject.com&gt;</code>), no la de una persona. Eso no es basura: para vender soporte o auditoría, una casilla institucional convierte mejor que la personal. Lo que no sirve es asumir que el campo <code>author</code> tiene algo — en tres de cada cuatro proyectos del top 100 está vacío.</p>
+<p><code>releases</code> te da la señal de actividad sin descargar nada: si la última versión tiene más de un año y el proyecto tiene 90 versiones, el maintainer está inactivo y no es un lead de compra, es un lead de fork.</p>
+<h2>Paso 3 — WordPress.org: el autor viene en HTML</h2>
+<p>El directorio de WordPress no tiene API REST, pero sí una API de lectura con parámetros estilo PHP: <code>https://api.wordpress.org/plugins/info/1.2/?action=query_plugins&amp;request[search]=seo&amp;request[per_page]=100</code>.</p>
+<pre><code>
+// wp-authors.mjs — uso: node wp-authors.mjs seo backup
+const q = new URLSearchParams({ action: 'query_plugins' });
+q.set('request[search]', process.argv[2] || 'seo');
+q.set('request[per_page]', '100');
+
+const res = await fetch('https://api.wordpress.org/plugins/info/1.2/?' + q);
+if (!res.ok) throw new Error('HTTP ' + res.status);
+const { plugins = [], info = {} } = await res.json();
+
+const strip = (html) =&gt; String(html || '').replace(/&lt;[^&gt;]*&gt;/g, '').trim();
+
+console.log('resultados:', info.results, 'de', info.pages, 'páginas');
+for (const p of plugins) {
+  console.log({
+    slug: p.slug,
+    active_installs: p.active_installs,
+    author: strip(p.author).split(/[,&amp;]/)[0].trim(), // "Rank Math SEO" en vez del &lt;a href&gt;
+    profile: p.author_profile,                        // /plugins/author/&lt;usuario&gt;/
+  });
+}
+</code></pre>
+<p>Los corchetes de <code>request[...]</code> tienen que ir codificados: si los mandás crudos, algunos clientes los normalizan y la API responde como si no hubieras filtrado nada. Y <code>author</code> trae un enlace HTML completo — sin <code>strip</code>, ese campo te ensucia toda la lista con markup y el deduplicado por nombre falla.</p>
+<p><code>active_installs</code> es el mejor filtro de priorización del directorio: es un entero redondeado (1000, 10000, 4000000), así que cortá en 10000 o más si querés leads con presupuesto. Para un plugin puntual, <code>action=plugin_information&amp;request[slug]=&lt;slug&gt;</code> devuelve además <code>author_profile</code>, que es el usuario de WordPress.org con el que se puede enriquecer después.</p>
+<h2>Paso 4 — App Store: vendedor y web, no email</h2>
+<p>La API de búsqueda de Apple devuelve JSON sin credenciales: <code>https://itunes.apple.com/search?term=&lt;término&gt;&amp;entity=software&amp;limit=200</code>. El máximo por consulta es 200 y no hay paginación real: para más, hay que segmentar por término y por país (<code>country=</code>).</p>
+<pre><code>
+// appstore-vendors.mjs — uso: node appstore-vendors.mjs factura
+const term = process.argv[2] || 'invoice';
+const url = 'https://itunes.apple.com/search?' + new URLSearchParams({
+  term,
+  entity: 'software',
+  country: 'es',
+  limit: '200',
+});
+
+const res = await fetch(url);
+if (!res.ok) throw new Error('HTTP ' + res.status);
+const { resultCount, results = [] } = await res.json();
+
+const seen = new Map();
+for (const app of results) {
+  if (!seen.has(app.sellerName)) {
+    seen.set(app.sellerName, {
+      seller: app.sellerName,
+      web: app.sellerUrl || null,
+      artistId: app.artistId,
+      apps: 0,
+    });
+  }
+  seen.get(app.sellerName).apps++;
+}
+
+console.log(resultCount, 'apps de', seen.size, 'vendedores');
+console.log([...seen.values()].sort((a, b) =&gt; b.apps - a.apps).slice(0, 10));
+</code></pre>
+<p>La API no da email ni nombre de contacto: da <code>sellerName</code>, <code>sellerUrl</code> y <code>artistId</code>. Se usa como semilla: la web del vendedor se scrappea con las mismas herramientas que cualquier otro sitio, y <code>artistId</code> agrupa todas las apps del mismo desarrollador, que es la señal de que hay una empresa detrás y no un proyecto de fin de semana.</p>
+<p>Un detalle que rompe la deduplicación: el mismo desarrollador publica con nombres distintos por país. Si consultás varios <code>country=</code>, agrupá por <code>artistId</code>, no por <code>sellerName</code>.</p>
+<h2>Cerrar el pipeline: normalizar antes de escribir</h2>
+<p>Las cuatro fuentes devuelven la misma entidad con cuatro formas. Antes de guardar, una sola clave:</p>
+<pre><code>
+// normalize.mjs
+const domainOf = (u) =&gt; {
+  try { return new URL(u).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
+};
+
+export function lead(source, { email, name, url, handle }) {
+  return {
+    source,                                  // npm | pypi | wordpress | appstore
+    email: email ? email.trim().toLowerCase() : null,
+    domain: domainOf(url),
+    handle: handle || null,
+    // Clave de dedupe: el email manda; si no hay, dominio; si no, plataforma+handle.
+    key: email
+      ? 'e:' + email.trim().toLowerCase()
+      : domainOf(url)
+        ? 'd:' + domainOf(url)
+        : handle
+          ? 'p:' + source + ':' + handle
+          : null,
+  };
+}
+</code></pre>
+<p>Tres reglas que evitan trabajo inútil:</p>
+<ul>
+<li>Descartá leads con <code>key === null</code>. Sin email, dominio ni handle no hay a quién escribir.</li>
+<li>Un mismo dominio puede aparecer como maintainer de npm y como autor de un plugin de WordPress. Eso no es ruido: es la señal más fuerte de que hay una empresa con varios productos.</li>
+<li>No mandes nada el mismo día que barrés. Un email a <code>maintainers[0].email</code> de un paquete sin actividad en 18 meses es una queja de spam esperando a pasar.</li>
+</ul>
+<h2>Costo y límites reales</h2>
+<p>Ninguna de las cuatro fuentes tiene cuota comercial ni pide token. Todas aplican cortesía: una petición por recurso, sin bucles por segundo, y un <code>User-Agent</code> que identifique la aplicación con un contacto. El registry de npm y PyPI devuelven 429 si abusás; WordPress.org responde lento con <code>per_page</code> alto, así que conviene 100 y no 250.</p>
+<p>El costo verdadero no es el acceso: es el mantenimiento. Los endpoints cambian de forma (PyPI ya mudó de <code>home_page</code> a <code>project_urls</code>), los campos de contacto se vacían y los paquetes se transfieren de dueño. Un barrido que corre una vez y se guarda en un CSV queda obsoleto en un mes.</p>
+<p>Los 10 extractores de B2B Leads Arsenal — Vol. 2 cubren estas cuatro fuentes más los directorios de Substack, podcasts, Eventbrite/Luma y cámaras de comercio, con normalización y deduplicado incluidos, para que no tengas que mantener el parser de cada ecosistema.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-04">B2B Leads Arsenal — Vol. 2 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>

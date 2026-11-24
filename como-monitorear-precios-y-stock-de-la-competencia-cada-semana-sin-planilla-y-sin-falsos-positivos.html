@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cómo monitorear precios y stock de la competencia cada semana (sin planilla y sin falsos positivos)</title>
+<meta name="description" content="Copiar precios a mano no escala. El trabajo real es el diff semanal: qué variante cambió, cuánto y si fue precio o quiebre de stock.">
+
+<style>
+:root{--ground:#0D0E11;--panel:#15171C;--ink:#F4F5F6;--ink2:#A8B3BF;--line:#2A2D33;--accent:#C7F464}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font:18px/1.65 ui-serif,Georgia,serif}
+header,footer{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+header{border-bottom:1px solid var(--line);padding:20px 24px}
+header a{color:var(--ink);text-decoration:none;letter-spacing:.06em;font-size:14px}
+main{max-width:720px;margin:0 auto;padding:56px 24px 96px}
+h1{font-size:2.2rem;line-height:1.15;margin:0 0 8px}
+h2{margin-top:2.2rem;font-size:1.35rem}
+h3{margin-top:1.6rem;font-size:1.1rem}
+p{margin:1rem 0}
+a{color:var(--accent)}
+code{background:var(--panel);padding:.15em .35em;border-radius:3px;font-size:.9em;font-family:ui-monospace,monospace}
+pre{background:var(--panel);border:1px solid var(--line);padding:16px;overflow-x:auto}
+pre code{background:none;padding:0}
+ul{padding-left:1.2rem}
+.meta{color:var(--ink2);font-size:.85rem;font-family:ui-monospace,monospace;margin-bottom:2rem}
+.cta{border:1px solid var(--line);background:var(--panel);padding:20px;margin:3rem 0 0}
+.cta p{margin:0 0 .6rem;color:var(--ink2);font-size:.95rem}
+.cta a{font-weight:700;text-decoration:none}
+.list{list-style:none;padding:0}
+.list li{border-bottom:1px solid var(--line);padding:18px 0}
+.list a{text-decoration:none;color:var(--ink);font-size:1.1rem}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--ink2);font-size:13px;text-align:center}
+</style>
+</head>
+<body>
+<header><a href="https://argenzolano1988.github.io/zabreuit-blog/">ZABREUIT · NOTAS TÉCNICAS</a></header>
+<main><p class="meta">2026-11-23</p><h1>Cómo monitorear precios y stock de la competencia cada semana (sin planilla y sin falsos positivos)</h1>
+<p>Copiar precios a mano no escala. El trabajo real es el diff semanal: qué variante cambió, cuánto y si fue precio o quiebre de stock.</p>
+<p>La escena se repite en cualquier agencia o tienda mediana: seis competidores, dos mil SKUs, una</p>
+<p>reunión de precios todos los martes. La primera semana alguien baja los catálogos a mano y arma</p>
+<p>un Excel. La segunda funciona. A la tercera el archivo tiene cuatro hojas, dos fórmulas rotas y</p>
+<p>nadie sabe si el precio de "Air Max 90 / talle 42" subió 3% o si cambió la forma en que la tienda</p>
+<p>escribe el número.</p>
+<p>El problema visible es bajar el catálogo. El problema real es <strong>comparar dos corridas</strong> y decidir</p>
+<p>qué merece una acción: un competidor que bajó 15%, un producto que se quedó sin stock, una lista de</p>
+<p>precios nueva que todavía no llegó a la web.</p>
+<h2>Por qué un diff ingenuo no sirve</h2>
+<p>Comparar dos CSV con un <code>diff</code> de texto falla por motivos que no tienen nada que ver con el negocio:</p>
+<ul>
+<li><strong>El precio es un string con formato local.</strong> Una tienda devuelve <code>"12.999,00"</code>, otra <code>"12999.00"</code> y</li>
+</ul>
+<p>  otra un entero en centavos. Si comparás texto, todo cambia todas las semanas.</p>
+<ul>
+<li><strong>Los IDs de variante no son estables.</strong> Si el merchant borra y recrea un producto, Shopify le asigna</li>
+</ul>
+<p>  otro <code>id</code>. Un diff por ID reporta "producto eliminado + producto nuevo" en vez de "mismo producto".</p>
+<ul>
+<li><strong>Las promociones ensucian la señal.</strong> <code>compare_at_price</code> cambia cuando arranca una campaña; el precio</li>
+</ul>
+<p>  de venta puede no moverse. Si mezclás los dos campos, cada promo es una alerta falsa.</p>
+<ul>
+<li><strong>El stock oscila.</strong> Un SKU que pasa de disponible a agotado y vuelve en dos días suele ser carga de</li>
+</ul>
+<p>  stock mal hecha, no un quiebre real. Reportarlo como evento es ruido.</p>
+<p>La regla práctica: <strong>normalizá al capturar, no al comparar</strong>, y hacé el diff sobre una clave estable.</p>
+<h2>Capturar: un snapshot por corrida, en NDJSON</h2>
+<p>El formato que menos duele es una línea JSON por variante, ordenada por clave. Es append-only por</p>
+<p>archivo, se puede inspeccionar con <code>grep</code> y no necesita base de datos:</p>
+<pre><code>
+snapshots/tienda.com/2026-11-16.ndjson
+snapshots/tienda.com/2026-11-23.ndjson
+snapshots/tienda.com/latest.ndjson   -&gt; copia de la última corrida
+</code></pre>
+<p>Clave estable: <code>handle#variantId</code>, y el SKU como dato aparte para poder reenganchar productos</p>
+<p>recreados. Guardá ocho semanas y borrá lo viejo: más historial no mejora la decisión.</p>
+<h2>El script (Node 18+, sin dependencias)</h2>
+<pre><code>
+// monitor.mjs — node monitor.mjs https://tienda.com
+import fs from "node:fs";
+import path from "node:path";
+
+const base = process.argv[2]?.replace(/\/$/, "");
+if (!base) throw new Error("uso: node monitor.mjs https://tienda.com");
+
+const host = new URL(base).hostname;
+const dir = path.join("snapshots", host);
+fs.mkdirSync(dir, { recursive: true });
+const latest = path.join(dir, "latest.ndjson");
+
+// "1.234,56" | "1234.56" -&gt; número, sin separadores de miles
+const parsePrice = (v) =&gt; {
+  if (typeof v === "number") return v;
+  const s = String(v).trim();
+  const decimalComma = s.includes(",") &amp;&amp; s.lastIndexOf(",") &gt; s.lastIndexOf(".");
+  const cleaned = decimalComma ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
+  const n = Number(cleaned.replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : null;
+};
+
+async function catalog() {
+  const out = new Map();
+  for (let page = 1; ; page++) {
+    const res = await fetch(`${base}/products.json?limit=250&amp;page=${page}`, {
+      headers: { "user-agent": "zabreuit-price-monitor/1.0 (+contacto)" },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} en page ${page}`);
+    const { products } = await res.json();
+    if (!products.length) break;
+    for (const p of products) {
+      for (const v of p.variants) {
+        const price = parsePrice(v.price);
+        if (price === null) continue;
+        const key = `${p.handle}#${v.id}`;
+        out.set(key, {
+          key,
+          sku: v.sku || "",
+          title: `${p.title} — ${v.title}`,
+          price,
+          compareAt: parsePrice(v.compare_at_price) ?? 0,
+          available: Boolean(v.available),
+          updated: p.updated_at,
+        });
+      }
+    }
+    await new Promise((r) =&gt; setTimeout(r, 400)); // cortesía con el servidor
+  }
+  return out;
+}
+
+const now = await catalog();
+const prev = fs.existsSync(latest)
+  ? new Map(fs.readFileSync(latest, "utf8").trim().split("\n").filter(Boolean)
+      .map((l) =&gt; JSON.parse(l)).map((r) =&gt; [r.key, r]))
+  : null;
+
+const events = [];
+const MIN_DELTA = 0.5; // % — por debajo de esto es redondeo o formato, no decisión de precio
+
+if (prev) {
+  for (const [key, r] of now) {
+    const before = prev.get(key);
+    if (!before) {
+      events.push(`| ${r.sku || "-"} | ${r.title} | nuevo | ${r.price} | - |`);
+      continue;
+    }
+    const delta = before.price ? ((r.price - before.price) / before.price) * 100 : 0;
+    if (Math.abs(delta) &gt;= MIN_DELTA) {
+      events.push(`| ${r.sku || "-"} | ${r.title} | precio | ${before.price} | ${r.price} (${delta.toFixed(1)}%) |`);
+    }
+    if (before.available !== r.available) {
+      events.push(`| ${r.sku || "-"} | ${r.title} | ${r.available ? "volvió" : "sin stock"} | - | - |`);
+    }
+  }
+  for (const [key, before] of prev) {
+    if (!now.has(key)) events.push(`| ${before.sku || "-"} | ${before.title} | eliminado | ${before.price} | - |`);
+  }
+}
+
+const snapshot = path.join(dir, `${new Date().toISOString().slice(0, 10)}.ndjson`);
+fs.writeFileSync(snapshot, [...now.values()].map((r) =&gt; JSON.stringify(r)).join("\n") + "\n");
+fs.copyFileSync(snapshot, latest);
+
+if (!events.length) {
+  console.log(`${now.size} variantes, sin cambios sobre el umbral`);
+} else {
+  const table = [
+    `| SKU | Producto | Tipo | Antes | Ahora |`,
+    `| --- | --- | --- | --- | --- |`,
+    ...events,
+  ].join("\n");
+  fs.writeFileSync("diff.md", table + "\n");
+  console.log(table);
+}
+</code></pre>
+<p>Cuatro decisiones que están en el código y no en un comentario:</p>
+<p>1. <strong>El umbral de 0,5%</strong> absorbe redondeos y cambios de formato, pero no una decisión de precio.</p>
+<p>2. <strong><code>compareAt</code> se guarda aparte</strong> y no entra al diff: sirve para explicar por qué cambió el precio</p>
+<p>   de venta, no para generar alertas.</p>
+<p>3. <strong>El stock se reporta solo como transición</strong> (<code>sin stock</code> / <code>volvió</code>), no como estado. Así ves el</p>
+<p>   quiebre, no la lista de agotados que ya conocías.</p>
+<p>4. <strong>La corrida nueva se escribe aunque no haya eventos.</strong> Si falla el fetch, el script corta antes</p>
+<p>   de tocar <code>latest.ndjson</code>, y la semana siguiente el diff sigue siendo contra la última corrida</p>
+<p>   buena, no contra un archivo vacío.</p>
+<p>La salida es deliberadamente aburrida, para pegar en el chat del equipo:</p>
+<pre><code>
+| SKU | Producto | Tipo | Antes | Ahora |
+| --- | --- | --- | --- | --- |
+| 884726 | Air Max 90 — 42 | precio | 129990 | 118990 (-8.5%) |
+| 884731 | Air Max 90 — 44 | sin stock | - | - |
+</code></pre>
+<h2>Programarlo y no pensar más</h2>
+<p>Un cron semanal alcanza. El detalle es no mandar mensaje cuando no hay nada que decir: si el</p>
+<p>reporte llega todas las semanas con la misma tabla vacía, el equipo lo ignora en un mes.</p>
+<pre><code>
+# martes 08:00, hora local del servidor
+0 8 * * 2 cd /srv/precios &amp;&amp; node monitor.mjs https://tienda.com &amp;&amp; \
+  [ -f diff.md ] &amp;&amp; node avisar.mjs diff.md &amp;&amp; rm diff.md
+</code></pre>
+<p>Si no tenés servidor, un GitHub Action con <code>schedule</code> corre lo mismo, pero necesita persistir el</p>
+<p>snapshot entre ejecuciones: un commit en una rama <code>snapshots</code> o un artefacto con retención de ocho</p>
+<p>semanas. Sin persistencia, todos los SKUs aparecen como "nuevos" cada semana.</p>
+<p>Para varias tiendas, un <code>for</code> sobre una lista de URLs y un <code>diff.md</code> por tienda; el consolidado es</p>
+<p>un <code>cat</code> de los archivos que existen.</p>
+<h2>Dónde esto no alcanza</h2>
+<ul>
+<li><strong>Catálogo cerrado.</strong> Si <code>products.json</code> devuelve 403 o 404, el merchant bloqueó la ruta. Queda</li>
+</ul>
+<p>  sitemap + JSON-LD del HTML, que es más frágil y más lento.</p>
+<ul>
+<li><strong>429 con <code>local_rate_limited</code>.</strong> Shopify limita <code>products.json</code> por IP y, en tiendas con</li>
+</ul>
+<p>  protección anti-bot, puede rechazar el cliente mientras <code>curl</code> responde 200. Si te pasa, capturá</p>
+<p>  con <code>curl -s "$URL/products.json?limit=250&amp;page=$p"</code> y parseá el JSON con <code>jq</code>, o asumí que esa</p>
+<p>  tienda necesita sitemap + JSON-LD. Reintentar a ciegas empeora el bloqueo.</p>
+<ul>
+<li><strong>Precios que dependen del login.</strong> Listas B2B, descuentos por cliente o precios por región con</li>
+</ul>
+<p>  cookie no son catálogo público. Eso requiere credenciales del retailer o su API oficial.</p>
+<ul>
+<li><strong>Impuestos y moneda.</strong> En algunos mercados el precio del endpoint es neto y el de la web es con</li>
+</ul>
+<p>  IVA. Comparar uno con otro da un 21% de diferencia que no existe. Guardá la moneda y el régimen</p>
+<p>  de impuestos junto al precio, o compará siempre el mismo campo.</p>
+<ul>
+<li><strong>Marketplaces.</strong> En Mercado Libre el precio cambia por vendedor y por tipo de publicación; el</li>
+</ul>
+<p>  catálogo público no alcanza y la API oficial pide token.</p>
+<ul>
+<li><strong>Cortesía y términos.</strong> Es data pública de catálogo, pero cada sitio tiene su <code>robots.txt</code> y sus</li>
+</ul>
+<p>  términos. Un request cada 400 ms y un <code>User-Agent</code> identificable es el mínimo; si el sitio pide</p>
+<p>  bajar el ritmo, se baja.</p>
+<ul>
+<li><strong>La clave no es eterna.</strong> Si la tienda migra de plataforma, cambian handles e IDs. Ahí el</li>
+</ul>
+<p>  reenganche es por SKU/EAN, y conviene tratarlo como una corrida de "re descubrimiento" en vez de</p>
+<p>  una semana con cien productos nuevos.</p>
+<h2>CTA</h2>
+<p>Si son dos tiendas Shopify, el script de arriba sobra. Cuando son ocho plataformas —Shopify, VTEX,</p>
+<p>WooCommerce, Magento, Tiendanube, Mercado Libre, PrestaShop, BigCommerce— el tiempo se va en</p>
+<p>normalizar cada catálogo sin perder EAN, variante ni stock, y en que la clave del diff sobreviva a</p>
+<p>la próxima migración. Eso es lo que empaqueté en <a href="https://gumroad.com/l/zabreuit-pack-01"><strong>E-commerce Intelligence — Vol. 1</strong></a></p>
+<p>(USD 79, diez extractores con el mismo esquema de salida). Si solo necesitás el exportador de</p>
+<p>Shopify con variantes y stock, está suelto en <a href="https://gumroad.com/l/shopify-catalog-scraper">Shopify Public Catalog and Variant Exporter</a>.</p><div class="cta">
+<p>Si preferís no mantener el script, hay un pack de 10 herramientas listo para usar.</p>
+<a href="https://gumroad.com/l/zabreuit-pack-01">E-commerce Intelligence — Vol. 1 — USD 79</a>
+</div></main>
+<footer>© 2026 Zabreuit · <a href="https://zabreuit.com">zabreuit.com</a></footer>
+</body>
+</html>
